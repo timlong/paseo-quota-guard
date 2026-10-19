@@ -1,0 +1,25 @@
+{
+  "mode": "observe",
+  "thresholds": {
+    "claude": {
+      "warn": 80,
+      "pause": 90
+    },
+    "codex": {
+      "warn": 90,
+      "pause": 95
+    }
+  },
+  "windowPolicy": {
+    "claude": "both",
+    "codex": "available"
+  },
+  "recoveryMargin": 2,
+  "activePollMs": 120000,
+  "idlePollMs": 300000,
+  "staleMs": 600000,
+  "pruneMs": 21600000,
+  "heartbeatMs": 10000,
+  "heartbeatTimeoutMs": 30000,
+  "notifications": false
+}

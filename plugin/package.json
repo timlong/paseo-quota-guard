@@ -1,0 +1,1 @@
+{"name":"paseo-quota-guard-plugin","private":true,"type":"module","devDependencies":{"@getpaseo/plugin":"0.11.2","@types/node":"^24.0.0","@types/react":"^19.0.0","react":"^19.0.0","react-native":"0.81.5","typescript":"^5.9.0","zod":"^4.4.3"},"scripts":{"typecheck":"tsc --noEmit"}}

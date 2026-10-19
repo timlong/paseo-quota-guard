@@ -1,0 +1,1 @@
+{"id":"quota-guard","name":"额度保护","description":"Claude / Codex 额度预警、手动暂停与自动暂停状态","requirements":{"paseo":">=0.11.2 <0.12.0"}}

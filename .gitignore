@@ -1,0 +1,7 @@
+node_modules/
+.local/
+*.db*
+*.sock
+*.log
+__pycache__/
+*.pyc

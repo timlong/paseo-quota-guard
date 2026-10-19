@@ -1,0 +1,6 @@
+{
+  "dist/server/server/agent/provider-registry.js": "358851d7f8c097dc4d85762a88e0fa780966b3c1f084faa4ee7958c4cb5e315c",
+  "dist/server/server/websocket-server.js": "ba8122d01dd17533231a573097ec4e9f91f4fd12caada107adb9f6706f5f8950",
+  "dist/server/builtin-plugins/codex-usage-source/server/usage.ts": "fd808c0259d7423757be8f0de13a69f963d7415400df674108ea7713d27389f1",
+  "dist/server/builtin-plugins/claude-usage-source/server/usage.ts": "4141e1ac89d418a477936f5c44aa59d4596b41beffdfa9c2f72bbaa0c76510a0"
+}

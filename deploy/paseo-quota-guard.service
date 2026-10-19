@@ -1,0 +1,17 @@
+[Unit]
+Description=Paseo quota monitor
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/paseo-quota-guard
+ExecStart=/usr/local/bin/node %h/workspace/paseo-quota-guard/.local/release/guard/main.mjs
+Environment=QUOTA_GUARD_HOME=%h/.local/state/paseo-quota-guard
+Environment=QUOTA_GUARD_CONFIG=%h/.config/paseo-quota-guard/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

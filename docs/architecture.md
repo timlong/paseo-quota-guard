@@ -1,0 +1,87 @@
+# 实现说明
+
+## 进程与数据流
+
+```text
+Paseo builtin usage sources ──→ Paseo bridge /snapshot ──→ quota guard
+                                                               │
+                                  SQLite 状态/通知 outbox ←─────┤
+                                                               │
+Paseo provider.run/startTurn/steer ──→ bridge ──→ guard /admit    │
+                                                               │
+Paseo provider interrupt ←────── bridge /interrupt ←─────────────┤
+Paseo 手机 Expo push ←───────── bridge /push ←───────────────────┘
+
+Paseo 插件 UI ──认证 RPC──→ 插件 server ──Unix socket──→ guard
+```
+
+外部 guard 进程为规则唯一写入者。Paseo bridge 在其 daemon 进程内提供运行时读取和控制能力，另设 watchdog。两者通过权限 0600 的 Unix socket 通信；状态目录权限 0700。用户身份一致的本地进程属于现有 Paseo 信任边界。
+
+核心采用 Node 24 ESM，减少发布构建和依赖数量；插件采用 TypeScript + React Native。与最初源码 fork 设想相比，首版直接对**已安装发布包的独立副本**应用可检查的补丁，并校验版本、原文件 SHA256 和唯一锚点。没有修改生产安装目录。升级到其他 Paseo 版本需要重新适配，不能直接套用补丁。
+
+补丁共四处：provider 包装入口、websocket 桥接、Codex 429 冷却，以及 Claude 额度源身份兜底。后者在 `discover()` 的凭据过期、profile 返回 status、profile 抛错三个兜底分支处，用「`hashAccountKey(JSON.stringify(input.route))` + 凭据秘密哈希」作为内存指纹（`Map`，达到 64 条时 clear）；`readProfile` 成功时记录指纹到真实 `{ key, label }`，兜底分支命中缓存则沿用真实账户身份，未命中才用原兜底哈希。秘密取 refreshToken 去空白（为空则取 accessToken 去空白），两者皆空则不读写缓存；指纹只存哈希与上游已公开的 key/label，绝不落盘或输出 token；凭据秘密变化会改变指纹，自动回退原兜底而不沿用旧账户。
+
+## 账户及窗口
+
+复用 `pluginRuntime.listUsageReports()`；会话通过 `agentId` 查询其实际登录，而不是按 provider 名称猜账号。内部助手也从 manager 的运行会话表枚举，不只使用过滤 internal 的公共 agent 列表。
+
+使用来源提供的稳定 report ID，不保存 OAuth token。只识别来源明确给出的 `five_hour` 与 `weekly`。不按重置时间猜测时长，也不把 token 统计转换成订阅用量。模型专属周限制等额外窗口首版不参与全账户暂停。
+
+Claude 必须两个窗口都有效；Codex 按用户确认只保护已返回的窗口，至少一个有效值。缺失、null、非法百分比、重复窗口、未知时长和明显未来时间不能变成零。遇到查询失败保留最近有效读数，最长 5 分钟；不能用过期数据恢复。
+
+对外部 Anthropic base URL、Bedrock、Vertex、设置 OPENAI_BASE_URL 的 Codex 路由不套用官方订阅账户规则。首版保护对象是原生 Claude/Codex。换账号后必须重新核对会话映射；数据源自身对稳定账户 ID 的正确性仍属于上游约束。
+
+## 状态与规则
+
+状态分两维保存：账户是否 locked，以及中断是否 confirmed/partial。这样“已禁止新请求”不会被错误表达成“所有任务都已停止”。
+
+| 情况 | 处理 |
+| --- | --- |
+| 达到预警线 | outbox 记入预警，同一窗口/重置周期去重 |
+| 达到暂停线 | 先写入 locked，再执行中断 |
+| 手动暂停 | 同一中断路径，原因单独记录 |
+| 数据超过 10 分钟（`staleMs`）或无有效读数 | 进入数据异常保护 |
+| 账户超过 pruneMs 未被报告、从未有有效读数、且未锁定无暂停状态 | 隐藏（不删行、不进 status）；锁定账户保持可见，再次报告自动取消隐藏 |
+| 恢复条件成立 | 保留 locked，显示可恢复；自动暂停账户发送恢复提示 |
+| 用户恢复 | 强制重新采集，验证余量后解除封锁；不发送模型消息 |
+| 正常中断失败 | 保持封锁，报告 partial，后续循环继续核验 |
+
+默认 Claude >=80% warning，>=90% pause；Codex >=90% warning，>=95% pause。恢复分别需要全部受控窗口 <88% / <93%。手动暂停后低读数不会自动恢复，也不会马上发送误导性的“额度已恢复”推送。
+
+## 请求拦截及中断
+
+在 `wrapSessionProvider` 安装代理，检查 `run`、`startTurn`、`steerActiveTurn`、`tryHandleOutOfBand` 和权限回应。普通发送、调度及继续任务最终通过这些 native provider 入口时接受统一检查。拒绝发生在真正向 provider 发送前，而不是只依赖定时 stop。
+
+保护开启且账户未知、guard 失联、模式不匹配时，enforce 模式拒绝请求；observe 模式不拦截。`/admit` 不等待外部采集或中断，避免 daemon 与 guard 相互等待。
+
+中断时重新确认账户归属，调用原生 session interrupt；Claude 已暴露的 `query.stopTask()` 可用于登记的后台任务。核验原生运行字段及 provider 子任务表。未确认停止时不强杀、不伪造任务结束。内部未登记或上游未正确上报的自主工作仍是需要真实 provider 验收的边界。
+
+## 轮询、失联与恢复
+
+活跃期间每 2 分钟轮询，空闲 5 分钟；采集失败（如 Claude 接口限流）时沿用上次有效读数直至过期，界面按原因提示限流、超时或登录失效；Paseo 额度源已按 Retry-After 冷却 429，冷却期内不再请求；新请求 admission 会让监控进入活跃节奏。多个会话先发现账户，再按 report ID 合并强制刷新。来源自身处理请求错误及限流，guard 不做高频立即重试。
+
+每 10 秒进行状态处理。保护开启时 Paseo watchdog 每 10 秒检查 guard，失联超过 30 秒时尝试中断运行任务；新请求在失联期间立即被拒绝。长时间卡在采集的 guard 也不能一直报告健康。暂停状态存 SQLite，服务重启不解除。
+
+## 通知语义
+
+独立发送额度通知，不受普通任务“电脑前台活跃则抑制手机推送”的策略影响。读取 Paseo 已有有效 push 订阅，不修改其注册文件。消息仅含必要的服务商、用量和关联导航字段，不发送项目源码、聊天内容或登录凭证。
+
+outbox 保存预警/暂停/恢复，失败指数退避，最多间隔 1 小时。新状态会取消过时通知。每个设备的成功 ticket 单独记入本地散列 ledger，避免部分失败重试导致已成功设备不断重复提醒。
+
+`submitted` 只代表 Expo 受理，不表示手机展示。断网、系统关闭通知或订阅过期必须在手机验收中处理；执行暂停不等待用户读通知。
+
+## 文件和配置
+
+运行时：`settings.json`、`state.db`、`guard.sock`、`paseo.sock`、`push-ledger.json`。状态目录不进 Git；只保存必要账户信息，不复制登录文件。插件的 RPC 动作固定为 status/refresh/pause/resume/test-push/settings。
+
+`config/default.json` 默认 observe、关闭真实通知，`pruneMs` 默认 21600000（6 小时，须为整数且大于 `staleMs`）。`config/paseo-0.11.2-hashes.json` 固定已验证的发布文件（含 Claude 与 Codex 两个 usage.ts）。staging 复制依赖、核心和插件，不依赖全局 npm 后续更新。
+
+## 界面实时设置
+
+侧栏底部“额度保护”或 `/quota` 打开同一页面。总开关和通知开关即时保存；阈值编辑需点击保存，支持小数，要求 0 ≤ warn < pause ≤ 100。每个服务商一组阈值覆盖其所有受控窗口。恢复余量为 min(2 个百分点, 暂停线的一半)。
+
+`/settings` 与账户状态操作串行化，校验整个设置及 revision，原子替换权限 0600 的 `settings.json`，立即重新判断已有读数并执行中断/通知。文件设置覆盖启动默认值；revision 防止多个界面覆盖他人的修改，也用于丢弃旧规则的待发通知。设置事件记入审计。修改阈值不会自动恢复已暂停账户。
+
+账户状态重置、审计与 `applied_settings_revision`/`applied_enabled` 元信息在同一个 SQLite 事务内提交；设置文件先原子落盘、账户事务随后提交。若进程在两步之间退出，启动时发现 meta 落后于 `settings.json` 的 revision，就按当前设置重放一次账户重置并推进 meta。旧库或新库缺失 meta 时，以当前设置初始化基线，**视现有账户状态为已按当前设置应用**（不重放、不改动账户），仅建立后续协调的起点。
+
+关闭总开关会清除额度锁定，不触发模型继续请求，保留采集。bridge 从同一设置文件读取关闭状态，因此关闭后即使 guard 失联也不拦截、不触发 watchdog。文件缺失或损坏不会被解释为用户主动关闭。重开立即重新评估，无有效数据时保持保护性拦截。observe/enforce 仍是部署能力配置；界面开关不能把未接入的观察部署伪装成已执行保护。
