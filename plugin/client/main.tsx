@@ -31,10 +31,12 @@ function until(ms: number): string {
 }
 
 const RESET_OUTCOMES: Record<string, string> = {
-  reset: 'Codex 额度已重置，已重新读取用量。若账户已被保护暂停，仍需手动恢复。',
+  reset: 'Codex 额度已重置。新读数满足恢复条件后，将自动解除额度保护暂停；手动暂停保持不变。',
   nothingToReset: 'Codex 后端表示当前没有需要重置的额度。',
   noCredit: '没有可用的重置卡。',
   alreadyRedeemed: '该重置卡已被使用。',
+  rejected: 'Codex 接口拒绝了此次 Reset，请刷新后核对卡片状态。',
+  unknown: 'Reset 结果待确认，已尝试刷新卡片和额度。请核对后再决定是否重试这张卡。',
 };
 
 function formatAgo(fetchedAt: number | null): string {
@@ -140,6 +142,8 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [creditErrors, setCreditErrors] = useState<Record<string, string>>({});
   const creditsRequested = useRef(new Set<string>());
+  const resetInFlight = useRef(false);
+  const resetRequests = useRef(new Map<string, string>());
   const load = useCallback(async () => {
     try { setData(await rpc({ action: 'status' }) as unknown as Snapshot); setError(''); }
     catch (e) { setError(String(e)); }
@@ -169,7 +173,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
       } });
       setEditingRevision(null);
       setNotice(options.enabled === false ? '保护已关闭，额度限制已解除；已暂停的任务不会自动继续。' :
-        options.enabled === true ? '保护开关已开启，按当前用量立即检查。实际执行状态见页面顶部。' : '设置已保存并即时生效；已暂停的账户仍需手动恢复。');
+        options.enabled === true ? '保护开关已开启，按当前用量立即检查。实际执行状态见页面顶部。' : '设置已保存并即时生效；额度保护暂停将在新读数满足条件后自动解除，手动暂停保持不变。');
       await load();
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
@@ -189,13 +193,25 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
     }
   }, [data, loadCredits]);
   async function resetCodex(accountId: string, creditId: string) {
+    if (resetInFlight.current) return;
+    resetInFlight.current = true;
+    const selection = JSON.stringify([accountId, creditId]);
+    // Correlation ID only; the server persists a separate UUID for upstream idempotency.
+    const requestId = resetRequests.current.get(selection) ?? `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+    resetRequests.current.set(selection, requestId);
     setBusy(true); setNotice(''); setError('');
     try {
-      const result = await rpc({ action: 'codex-reset', accountId, creditId });
-      setNotice(RESET_OUTCOMES[String(result.outcome)] ?? '重置请求已完成，请核对用量。');
+      const result = await rpc({ action: 'codex-reset', accountId, creditId, requestId });
+      const outcome = String(result.outcome);
+      if (outcome in RESET_OUTCOMES && outcome !== 'unknown') resetRequests.current.delete(selection);
+      setNotice((RESET_OUTCOMES[outcome] ?? RESET_OUTCOMES.unknown) +
+        (result.refreshIncomplete ? ' 卡片或额度尚未成功刷新，请点击“刷新额度”核对。' : ''));
       await load();
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
+    } catch (e) {
+      await loadCredits(accountId, true);
+      setNotice(`Reset 未完成或结果待确认：${String(e)}。请核对所选卡片后再操作。`);
+    }
+    finally { resetInFlight.current = false; setBusy(false); }
   }
   async function refreshCodex(accountId: string) {
     setBusy(true);
@@ -204,7 +220,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
     finally { setBusy(false); }
   }
   async function act(action: 'refresh' | 'pause' | 'resume' | 'test-push', accountId?: string) {
-    setBusy(true); setNotice('');
+    setBusy(true); setNotice(''); setError('');
     try {
       const result = await rpc({ action, accountId });
       if (action === 'test-push') setNotice(result.accepted ? '推送网关已受理，请在手机上确认实际送达。' : String(result.reason ?? '推送未被受理'));
@@ -269,7 +285,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
               </View>)}
             </View>
           </View>)}
-          <Text style={[styles.note, { color: c.foregroundMuted }]}>0 ≤ 预警 &lt; 自动暂停 ≤ 100；各自应用到已监控的 5 小时／周窗口。降低暂停线可能立即中断任务。调高阈值不自动恢复。</Text>
+          <Text style={[styles.note, { color: c.foregroundMuted }]}>0 ≤ 预警 &lt; 自动暂停 ≤ 100；各自应用到已监控的 5 小时／周窗口。降低暂停线可能立即中断任务。额度保护暂停需等待新读数满足恢复条件后自动解除；手动暂停保持不变。</Text>
           {editingRevision !== null && editingRevision !== data.settingsRevision && <Text style={[styles.note, { color: c.statusWarning }]}>另一设备已修改设置，请取消编辑后重新调整。</Text>}
           <View style={[styles.row, { gap: 8 }]}>
             <ActionButton c={c} primary label="保存阈值" disabled={busy || editingRevision === null || editingRevision !== data.settingsRevision}
@@ -291,6 +307,9 @@ function AccountCard({ c, data, a, busy, onToggle, codex }: {
 }) {
   const threshold: Threshold | undefined = data.thresholds[a.provider];
   const badge = accountBadge(data, a, c);
+  const resumeHint = !data.enabled ? '额度保护已关闭' : !data.enforcementReady ? '执行层未就绪，请等待连接恢复' :
+    !a.ready ? a.assessment.resumeReason ?? '额度尚未满足恢复条件，请刷新后重试' :
+    a.assessment.usingCachedReading ? '上次有效读数仍在有效期内，可手动恢复；继续保护额度。' : '可手动恢复，之后进入原会话继续。';
   return <Card c={c}>
     <View style={styles.between}>
       <View style={[styles.row, { flex: 1, gap: 8 }]}>
@@ -302,23 +321,34 @@ function AccountCard({ c, data, a, busy, onToggle, codex }: {
         disabled={busy || !data.enabled || !data.enforcementReady || (a.locked && !a.ready)} />
     </View>
     {data.enabled && a.locked && <KeyValue c={c} label="原因" value={a.reason} />}
+    {data.enabled && a.locked && <KeyValue c={c} label="执行结果" value={a.stopStatus === 'paused' ?
+      a.stopDetails?.checkedCount === 0 ? '新请求已受限，本次未发现可中断的关联任务' : '本次已核验的关联任务已停止' :
+      a.stopStatus === 'partial' ? '部分关联任务未停止或无法确认' : '正在确认关联任务的暂停结果'} />}
+    {a.locked && <Text style={[styles.note, { color: a.ready ? c.foregroundMuted : c.statusWarning }]}>{resumeHint}</Text>}
+    {data.enabled && a.locked && a.pauseCause === 'quota' && <Text style={[styles.note, { color: c.foregroundMuted }]}>新读数确认所有受保护窗口满足恢复条件后，将自动解除暂停并通知；旧任务不会自动续跑。</Text>}
     {data.enabled && !a.locked && a.assessment.level === 'warning' && <Text style={[styles.note, { color: c.statusWarning }]}>额度预警，可随时手动暂停</Text>}
-    {codex && <CodexCreditsInfo c={c} {...codex} />}
+    {codex && <CodexCreditsInfo c={c} busy={busy} {...codex} />}
     {a.windows.map(w => <WindowRow key={w.id} c={c} label={w.id === 'weekly' ? '周' : '5 小时'} used={w.used} reset={w.reset}
       threshold={data.enabled ? threshold : undefined} />)}
     {a.provider === 'codex' && a.windows.length === 1 && <Text style={[styles.note, { color: c.foregroundMuted }]}>仅保护当前返回的{a.windows[0].id === 'weekly' ? '周' : '5 小时'}额度；另一窗口未提供。</Text>}
     <KeyValue c={c} label="阈值" value={threshold ? `预警 ${threshold.warn}% · 暂停 ${threshold.pause}%` : '未配置'} />
     <KeyValue c={c} label="更新" value={formatAgo(a.fetchedAt)} />
-    {!!a.error && <KeyValue c={c} label="采集异常" value={a.error} color={a.error.includes('沿用上次读数') ? c.statusWarning : c.statusDanger} />}
+    {!!a.error && <KeyValue c={c} label="采集异常" value={a.error} color={a.assessment.usingCachedReading ? c.statusWarning : c.statusDanger} />}
     {!!a.label && <Text numberOfLines={1} style={{ color: c.foregroundMuted, fontSize: 13 }}>{a.label}</Text>}
-    {codex && <CodexResetActions c={c} busy={busy} {...codex} />}
+    {codex && <View style={[styles.row, { justifyContent: 'flex-end' }]}>
+      <ActionButton c={c} icon="RefreshCw" label="刷新额度" disabled={busy} onPress={codex.onRefresh} />
+    </View>}
   </Card>;
 }
 
-function CodexCreditsInfo({ c, credits, error }: { c: Colors } & CodexProps) {
+export function CodexCreditsInfo({ c, busy, credits, error, onReset }: { c: Colors; busy: boolean } & CodexProps) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = credits?.credits.find(item => item.id === selectedId);
+  const available = (item: CodexCredits['credits'][number]) => item.expiresAt === null || item.expiresAt > Date.now();
   if (!credits) return <Text style={[styles.note, { color: error ? c.statusDanger : c.foregroundMuted }]}>{error ? `重置卡读取失败：${error}` : '正在读取重置卡…'}</Text>;
   const plan = credits.planType ? credits.planType[0].toUpperCase() + credits.planType.slice(1) : '未知';
   return <View style={{ gap: 8 }}>
+    {!!error && <Text style={[styles.note, { color: c.statusWarning }]}>{error}</Text>}
     <View style={[styles.row, { gap: 16, flexWrap: 'wrap' }]}>
       <View style={[styles.row, { gap: 6 }]}>
         <Text style={{ color: c.foregroundMuted, fontSize: 14 }}>套餐</Text>
@@ -330,38 +360,30 @@ function CodexCreditsInfo({ c, credits, error }: { c: Colors } & CodexProps) {
     {credits.credits.length > 0 && <>
       <Text style={{ color: c.foregroundMuted, fontSize: 13, fontWeight: '600' }}>主动重置过期时间（GMT+8）</Text>
       {credits.credits.map((item, i) => <View key={item.id} style={[styles.between, styles.creditRow, { borderColor: c.border }]}>
-        <Text style={{ color: c.foregroundMuted, fontSize: 14 }}>第 {i + 1} 次</Text>
-        <Text style={{ color: c.foregroundMuted, fontSize: 14 }}>
-          {item.expiresAt ? <>{gmt8(item.expiresAt)} · <Text style={{ color: c.foreground, fontWeight: '600' }}>{until(item.expiresAt)}</Text></> : '不过期'}
-        </Text>
+        <Text style={{ color: c.foregroundMuted, fontSize: 14 }}>第 {i + 1} 张</Text>
+        <View style={[styles.row, { gap: 12, justifyContent: 'flex-end', flexWrap: 'wrap', flex: 1 }]}>
+          <Text style={{ color: c.foregroundMuted, fontSize: 14 }}>
+            {item.expiresAt ? <>{gmt8(item.expiresAt)} · <Text style={{ color: c.foreground, fontWeight: '600' }}>{until(item.expiresAt)}</Text></> : '不过期'}
+          </Text>
+          <ActionButton c={c} label="Reset" disabled={busy || !available(item)} onPress={() => setSelectedId(item.id)} />
+        </View>
       </View>)}
     </>}
-  </View>;
-}
-
-function CodexResetActions({ c, busy, credits, onReset, onRefresh }: { c: Colors; busy: boolean } & CodexProps) {
-  const [confirming, setConfirming] = useState(false);
-  const next = credits?.credits[0];
-  const usable = !!credits?.limitReached && !!next;
-  return <View style={{ gap: 8 }}>
-    {confirming && next && <View style={[styles.banner, { backgroundColor: c.surface2, borderLeftColor: c.statusWarning }]}>
-      <Text style={{ flex: 1, color: c.foreground, fontSize: 13 }}>
-        将使用第 1 次重置{next.expiresAt ? `（${gmt8(next.expiresAt)} 到期）` : ''}，重置后不可撤回。
-      </Text>
+    {!credits.credits.length && <Text style={[styles.note, { color: c.foregroundMuted }]}>暂无可用的重置卡。</Text>}
+    {selectedId !== null && <View style={{ gap: 8 }}>
+      <View style={[styles.banner, { backgroundColor: c.surface2, borderLeftColor: c.statusWarning }]}>
+        <Text style={{ flex: 1, color: c.foreground, fontSize: 13 }}>
+          {selected && available(selected)
+            ? `确定使用第 ${credits.credits.findIndex(item => item.id === selectedId) + 1} 张重置卡？${selected.expiresAt ? `到期时间：${gmt8(selected.expiresAt)}（GMT+8）。` : ''}操作不可撤回。`
+            : '所选重置卡已过期或不可用，请取消后重新选择。'}
+        </Text>
+      </View>
+      <View style={[styles.row, { gap: 8, justifyContent: 'flex-end' }]}>
+        <ActionButton c={c} label="取消" disabled={busy} onPress={() => setSelectedId(null)} />
+        <ActionButton c={c} primary label="Reset" disabled={busy || !selected || !available(selected)}
+          onPress={() => { if (selected && available(selected)) { setSelectedId(null); onReset(selected.id); } }} />
+      </View>
     </View>}
-    {!!credits && !credits.limitReached && <Text style={[styles.note, { color: c.foregroundMuted }]}>额度未触顶时无需重置，不会消耗重置卡。</Text>}
-    <View style={[styles.row, { gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }]}>
-      {confirming
-        ? <>
-          <ActionButton c={c} label="取消" disabled={busy} onPress={() => setConfirming(false)} />
-          <ActionButton c={c} primary icon="RotateCcw" label="确认重置" disabled={busy || !usable}
-            onPress={() => { setConfirming(false); if (next) onReset(next.id); }} />
-        </>
-        : <>
-          <ActionButton c={c} icon="RotateCcw" label="重置额度" disabled={busy || !usable} onPress={() => setConfirming(true)} />
-          <ActionButton c={c} icon="RefreshCw" label="刷新额度" disabled={busy} onPress={onRefresh} />
-        </>}
-    </View>
   </View>;
 }
 

@@ -35,18 +35,18 @@ export function normalizeReport(entry, now, config) {
   return {
     id: entry.id, provider: entry.sourceId, label: entry.account?.label ?? entry.sourceLabel,
     fetchedAt: valid ? fetchedAt : null, windows: valid ? windows : [],
-    error: valid ? null : reportProblem(entry.report),
+    ...(valid ? { error: null, errorCode: null } : reportProblem(entry.report)),
   };
 }
 
 // Explain why a reading is unusable without guessing; the last valid windows stay in place until staleMs.
 function reportProblem(report) {
-  if (report?.status === 'available') return '缺少可识别的 5 小时/周额度或读数无效';
-  if (report?.status === 'unavailable') return '登录失效或额度不可用';
+  if (report?.status === 'available') return { errorCode: 'invalid_data', error: '缺少可识别的 5 小时/周额度或读数无效' };
+  if (report?.status === 'unavailable') return { errorCode: 'unavailable', error: '登录失效或额度不可用' };
   const message = typeof report?.error === 'string' ? report.error : '';
-  if (/rate.?limit|429|cooling down/i.test(message)) return '额度接口限流，暂时沿用上次读数';
-  if (/timed? ?out/i.test(message)) return '额度读取超时，暂时沿用上次读数';
-  return '额度读取失败';
+  if (/rate.?limit|429|cooling down/i.test(message)) return { errorCode: 'rate_limited', error: '额度接口限流，暂时沿用上次读数' };
+  if (/timed? ?out/i.test(message)) return { errorCode: 'timeout', error: '额度读取超时，暂时沿用上次读数' };
+  return { errorCode: 'read_failed', error: '额度读取失败' };
 }
 
 export function assess(account, config, now) {
@@ -54,11 +54,17 @@ export function assess(account, config, now) {
   const t = config.thresholds[account.provider];
   const enough = config.windowPolicy[account.provider] === 'available' ? account.windows.length >= 1 : account.windows.length === 2;
   if (!fresh || !enough)
-    return { level: 'unknown', canResume: false, reason: '额度数据缺失或过期' };
+    return { level: 'unknown', canResume: false, reason: '额度数据缺失或过期', resumeReason: '额度数据缺失或过期，请成功刷新后恢复', usingCachedReading: false };
   const high = account.windows.reduce((a, b) => a.used >= b.used ? a : b);
+  const usingCachedReading = Boolean(account.error) && ['rate_limited', 'timeout'].includes(account.errorCode);
+  const resumeBelow = t.pause - Math.min(config.recoveryMargin, t.pause / 2);
+  const below = account.windows.every(w => w.used < resumeBelow);
+  const usable = !account.error || usingCachedReading;
   return {
     level: high.used >= t.pause ? 'pause' : high.used >= t.warn ? 'warning' : 'normal',
-    canResume: account.windows.every(w => w.used < t.pause - Math.min(config.recoveryMargin, t.pause / 2)),
+    canResume: usable && below,
+    resumeReason: !usable ? `${account.error}，请成功刷新后恢复` : !below ? `所有受保护窗口须低于 ${resumeBelow}% 才能恢复` : null,
+    usingCachedReading,
     reason: `${high.id === 'weekly' ? '周' : '5 小时'}额度已用 ${high.used}%`,
   };
 }

@@ -2,19 +2,21 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { assess, validateConfig } from './policy.mjs';
+import { assess, reportText, validateConfig } from './policy.mjs';
+import { warningIsCurrent } from './warnings.mjs';
 import { Store } from './store.mjs';
 import { Engine } from './engine.mjs';
 import { call, serve } from './ipc.mjs';
 import { readSettings, saveSettings, restoreSettings } from './settings.mjs';
 import { readCredits, consumeCredit } from './codex-account.mjs';
+import { createCreditReset } from './codex-reset.mjs';
 
-export async function startService({ home, config, bridgePath, now = Date.now, codex = null }) {
+export async function startService({ home, config, bridgePath, now = Date.now, codex = null, stopNoticeMs = 60000 }) {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const saved = readSettings(home);
   config = { ...config, enabled: true, ...saved, settingsRevision: saved?.revision ?? 0 };
   const store = new Store(join(home, 'state.db'));
-  const engine = new Engine(validateConfig(config), store, now);
+  const engine = new Engine(validateConfig(config), store, now, { stopNoticeMs });
   // 启动协调：meta 缺失（新库或旧版升级）时以当前设置初始化基线，视现有账户为已按当前设置应用；
   // 否则设置文件先落盘、账户事务后提交，若进程在两步之间退出，DB 落后于设置文件时按当前设置重放账户重置。
   if (store.getMeta('applied_settings_revision') === undefined) {
@@ -36,22 +38,44 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
   const serial = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
   async function stopAccounts() {
     if (config.mode !== 'enforce' || !config.enabled) return;
-    for (const a of engine.accounts.values()) {
-      if (!a.locked) continue;
-      try { engine.stopResult(a.id, await bridge('/interrupt', { accountId: a.id })); }
-      catch { engine.stopResult(a.id, { complete: false, error: '无法联系 Paseo 执行中断', pending: [] }); }
+    // Start all interruptions before any push; notification latency must not delay task stopping.
+    const attempts = [...engine.accounts.values()].filter(a => a.locked).map(a => ({ a,
+      interrupt: bridge('/interrupt', { accountId: a.id }).catch(() =>
+        ({ complete: false, error: '无法联系 Paseo 执行中断', pending: [] })),
+    }));
+    for (const { a, interrupt } of attempts) {
+      let timer;
+      const slow = Symbol('slow');
+      try {
+        let result = await Promise.race([interrupt, new Promise(resolve => {
+          timer = setTimeout(() => resolve(slow), stopNoticeMs);
+        })]);
+        if (result === slow) {
+          engine.stopPending(a.id, true);
+          await deliver();
+          result = await interrupt;
+        }
+        engine.stopResult(a.id, result);
+        // A slow or unavailable account must not hold back another account's result notification.
+        await deliver();
+      } finally { clearTimeout(timer); }
     }
   }
   async function deliver() {
     if (!config.enabled || !config.notifications || config.mode !== 'enforce') return;
     for (const job of store.pending(now())) {
       const payload = JSON.parse(job.body); const a = engine.accounts.get(payload.accountId);
-      if (payload.settingsRevision !== config.settingsRevision || !a || (payload.kind === 'warning' && (a.locked || assess(a, config, now()).level !== 'warning')) ||
-          (payload.kind === 'partial' && a.stopStatus !== 'partial') ||
-          (payload.kind === 'paused' && a.stopStatus !== 'paused') ||
-          (payload.kind === 'ready' && !a.ready) || (payload.epoch !== a.epoch && payload.kind !== 'warning')) {
-        store.complete(job.key); continue;
+      const assessment = a && assess(a, config, now());
+      if (!a || (payload.kind === 'warning' && (a.locked || assessment.level !== 'warning' ||
+          (a.error && !assessment.usingCachedReading) || !warningIsCurrent(a, payload.warnings, config))) ||
+          ['stopping', 'ready'].includes(payload.kind) ||
+          (payload.kind === 'partial' && (!a.locked || a.stopStatus !== 'partial')) ||
+          (payload.kind === 'paused' && (!a.locked || a.stopStatus !== 'paused')) ||
+          (payload.kind === 'recovered' && (a.locked || !assessment.canResume)) || (payload.epoch !== a.epoch && payload.kind !== 'warning')) {
+        store.cancel(job.key); continue;
       }
+      // Settings do not create new event identities. Render pending warnings using current thresholds.
+      if (payload.kind === 'warning') payload.body = `${reportText(a, config)} 打开 Paseo 的“额度保护”查看或操作。`;
       try {
         const r = await bridge('/push', { ...payload, key: job.key });
         if (!r.accepted) throw new Error('推送未被网关受理');
@@ -61,8 +85,9 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
     }
   }
   async function tick(force = false) {
-    if (busy || stopped) return;
+    if (busy || stopped) return false;
     busy = true; tickStarted = now();
+    let refreshed = false;
     try {
       const active = engine.agents.some(a => a.running) || now() - lastActivity < config.activePollMs * 2;
       if (force || now() - lastPoll >= (active ? config.activePollMs : config.idlePollMs)) {
@@ -73,15 +98,16 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
           if (bridgeMode !== config.mode) throw new Error('监控与执行层模式不一致');
           await serial(() => {
             engine.ingest(snapshot.reports); engine.agents = snapshot.agents; engine.lastSnapshot = now(); lastError = null;
+            refreshed = true;
           });
         } catch { lastError = bridgeMode !== null && bridgeMode !== config.mode ? '监控与执行层模式不一致，保护未就绪' : 'Paseo 不可连接或额度采集失败'; }
       }
       await serial(async () => { engine.ingest([]); await stopAccounts(); await deliver(); });
     } finally { busy = false; }
+    return refreshed;
   }
-  const codexApi = codex ?? { read: () => readCredits(config.codexCommand), consume: id => consumeCredit(config.codexCommand, id) };
+  const codexApi = codex ?? { read: () => readCredits(config.codexCommand), consume: (id, key) => consumeCredit(config.codexCommand, id, key) };
   const codexCredits = new Map();
-  let resetting = false;
   async function loadCredits(accountId) {
     const a = engine.accounts.get(accountId);
     if (!a || a.provider !== 'codex') throw new Error('不是已采集的 Codex 账户');
@@ -91,6 +117,12 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
     codexCredits.set(accountId, summary);
     return summary;
   }
+  const resetCredit = createCreditReset({ store, now, loadCredits, consume: (id, key) => codexApi.consume(id, key),
+    invalidate: id => codexCredits.delete(id),
+    refreshUsage: async id => {
+      if (!await tick(true) || engine.require(id).error) throw new Error('额度尚未成功刷新');
+    },
+  });
   const server = await serve(join(home, 'guard.sock'), async (path, body) => {
     if (path === '/health') return { ok: !busy || now() - tickStarted < config.heartbeatTimeoutMs, mode: config.mode, time: now() };
     if (path === '/status') return { ...engine.status(), codexCredits: Object.fromEntries(codexCredits), lastError, bridgeMode, enforcementReady: config.enabled && config.mode === 'enforce' && bridgeMode === 'enforce' && lastError === null };
@@ -131,6 +163,7 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
     }
     if (path === '/pause') return serial(async () => { engine.pause(body.accountId); await stopAccounts(); await deliver(); return engine.status(); });
     if (path === '/resume') {
+      if (!config.enabled || config.mode !== 'enforce') throw new Error('额度保护未开启或当前为观察模式');
       const snapshot = await bridge('/snapshot', { forceRefresh: true });
       if (snapshot.mode !== config.mode) throw new Error('监控与执行层模式不一致');
       if (!snapshot.reports.some(r => r.id === body.accountId)) throw new Error('本次刷新未返回该账户，不能恢复');
@@ -142,22 +175,7 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
       if (!body.force && cached && now() - cached.fetchedAt < 600000) return cached;
       return loadCredits(body.accountId);
     }
-    if (path === '/codex-reset') {
-      if (resetting) throw new Error('正在重置，请稍候');
-      resetting = true;
-      try {
-        const summary = await loadCredits(body.accountId);
-        if (!summary.limitReached) throw new Error('Codex 额度尚未触顶，现在无需重置，未消耗重置卡');
-        const credit = body.creditId ? summary.credits.find(c => c.id === body.creditId) : summary.credits[0];
-        if (!credit) throw new Error('该重置卡已不可用，请刷新后重试');
-        const outcome = await codexApi.consume(credit.id);
-        store.audit('reset_credit_consumed', { accountId: body.accountId, outcome, expiresAt: credit.expiresAt }, now());
-        codexCredits.delete(body.accountId);
-        await tick(true);
-        await loadCredits(body.accountId).catch(() => {});
-        return { outcome, credits: codexCredits.get(body.accountId) ?? null };
-      } finally { resetting = false; }
-    }
+    if (path === '/codex-reset') return resetCredit(body);
     if (path === '/test-push') {
       if (!config.notifications) throw new Error('通知未启用');
       return bridge('/push', { key: `test:${now()}`, title: '额度保护测试通知', body: '请打开 Paseo 的“额度保护”页面。此通知没有暂停任何任务。', kind: 'test' });

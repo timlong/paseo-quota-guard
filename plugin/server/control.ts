@@ -20,6 +20,6 @@ export async function handleControl(input: RpcInput<typeof control>): Promise<Re
     req.on('error', () => reject(new Error('额度保护服务不可连接，请检查 qt38 后台服务')));
     req.setTimeout(input.action === 'codex-reset' ? 150000 : 60000, () => req.destroy(new Error('操作超时，请刷新核对结果')));
     req.end(JSON.stringify(input.action === 'settings' ? input.settings
-      : { accountId: input.accountId, creditId: input.creditId, force: input.force }));
+      : { accountId: input.accountId, creditId: input.creditId, requestId: input.requestId, force: input.force }));
   });
 }

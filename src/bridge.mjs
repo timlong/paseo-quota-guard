@@ -95,7 +95,7 @@ export async function startBridge({ manager, runtime, paseoHome, serverId, logge
       if (!pending.length) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     } while (Date.now() < deadline);
-    return { complete: pending.length === 0 && failures.length === 0, pending, failures };
+    return { complete: pending.length === 0 && failures.length === 0, pending, failures, checkedCount: selected.length };
   }
   async function snapshot(forceRefresh) {
     if (!runtime) throw new Error('Paseo 插件运行时不可用');

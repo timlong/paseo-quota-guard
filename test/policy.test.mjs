@@ -46,9 +46,9 @@ test('5h 重置但周额度仍超限不能恢复；恢复不自动续跑', t => 
   f.engine.ingest([report('claude', 0, 88, f.now())]);
   assert.throws(() => f.engine.resume(id));
   f.engine.ingest([report('claude', 0, 87, f.now())]);
-  assert.equal(f.engine.require(id).locked, true);
-  assert.equal(f.engine.require(id).ready, true);
-  f.engine.resume(id);
+  assert.equal(f.engine.require(id).locked, false);
+  assert.equal(f.engine.require(id).ready, false);
+  assert.equal(f.store.pending(f.now()).filter(m => JSON.parse(m.body).kind === 'recovered').length, 1);
   assert.equal(f.engine.admission([id]).allowed, true);
 });
 test('手动暂停是持久状态，额度低也不自动恢复', t => {
@@ -91,6 +91,7 @@ test('观察模式不阻止、不入生产通知队列、不执行手动暂停',
 test('暂停失败与成功分别记录，重试不重复通知', t => {
   const f = fixture(t); f.engine.ingest([report('claude', 91, 0, f.now())]);
   f.engine.stopResult('claude:a', { complete: false, pending: ['agent'] });
+  f.advance(60000);
   f.engine.stopResult('claude:a', { complete: false, pending: ['agent'] });
   assert.equal(f.store.pending(f.now()).length, 1);
   assert.equal(f.engine.require('claude:a').stopStatus, 'partial');

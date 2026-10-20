@@ -57,11 +57,14 @@ test('自动 unknown 锁定不隐藏', t => {
 test('partial 暂停状态不隐藏', t => {
   const f = fixture(t, { enabled: false });
   f.engine.ingest([bad('claude', 'a', f.now())]);
-  f.engine.stopResult('claude:a', { complete: false, pending: ['agent'] });
-  assert.equal(f.engine.require('claude:a').stopStatus, 'partial');
+  // Legacy persisted partial state must remain visible even without a lock.
+  const account = f.engine.require('claude:a');
+  account.stopStatus = 'partial'; f.store.save(account);
+  const restored = new Engine(f.engine.config, f.store, f.now);
+  assert.equal(restored.require('claude:a').stopStatus, 'partial');
   f.advance(f.engine.config.pruneMs + 1);
-  f.engine.ingest([]);
-  assert.equal(f.engine.isHidden(f.engine.require('claude:a')), false);
+  restored.ingest([]);
+  assert.equal(restored.isHidden(restored.require('claude:a')), false);
 });
 
 test('未超时不隐藏', t => {

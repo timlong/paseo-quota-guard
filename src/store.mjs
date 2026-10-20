@@ -25,6 +25,8 @@ export class Store {
   }
   pending(now) { return this.db.prepare("SELECT * FROM outbox WHERE status='pending' AND next_at<=? ORDER BY rowid LIMIT 20").all(now); }
   complete(key) { this.db.prepare("UPDATE outbox SET status='submitted' WHERE key=?").run(key); }
+  cancel(key) { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE key=? AND status='pending'").run(key); }
+  notificationHistory() { return this.db.prepare('SELECT key,body,status FROM outbox ORDER BY rowid').all(); }
   retry(key, attempts, now) {
     this.db.prepare('UPDATE outbox SET attempts=?, next_at=? WHERE key=?').run(attempts, now + Math.min(3600000, 30000 * 2 ** Math.min(attempts, 7)), key);
   }

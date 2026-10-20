@@ -1,7 +1,6 @@
 // Codex rate-limit reset credits via the official Codex app-server (JSON-RPC over stdio).
 // Methods: account/rateLimits/read and account/rateLimitResetCredit/consume (codex-cli 0.162 protocol).
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 
 const OUTCOMES = new Set(['reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed']);
 
@@ -31,7 +30,7 @@ export function codexRpc(command, method, params, timeoutMs = 30000) {
           write({ method: 'initialized' });
           write({ id: 2, method, params });
         } else if (m.id === 2) {
-          return m.error ? finish(new Error('Codex 拒绝了请求')) : finish(null, m.result);
+          return m.error ? finish(Object.assign(new Error('Codex 拒绝了请求'), { code: 'CODEX_REJECTED' })) : finish(null, m.result);
         }
       }
     });
@@ -57,7 +56,7 @@ export function summarize(result, now = Date.now()) {
     accountId: typeof result.accountId === 'string' ? result.accountId : null,
     planType: typeof rl.planType === 'string' ? rl.planType : null,
     creditBalance: Number.isFinite(balance) ? balance : null,
-    // Reset credits only apply once a limit is hit; never infer this from percentages.
+    // Informational only. The user decides when to redeem a credit.
     limitReached: result.ordinaryUsageAllowed === false || rl.rateLimitReachedType != null,
     availableCount: Number.isFinite(count) ? count : credits.length,
     credits, fetchedAt: now,
@@ -68,8 +67,9 @@ export async function readCredits(command, timeoutMs) {
   return summarize(await codexRpc(command, 'account/rateLimits/read', {}, timeoutMs));
 }
 
-export async function consumeCredit(command, creditId, timeoutMs) {
-  const result = await codexRpc(command, 'account/rateLimitResetCredit/consume', { idempotencyKey: randomUUID(), creditId }, timeoutMs);
+export async function consumeCredit(command, creditId, idempotencyKey, timeoutMs) {
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey) throw new Error('缺少重置请求标识');
+  const result = await codexRpc(command, 'account/rateLimitResetCredit/consume', { idempotencyKey, creditId }, timeoutMs);
   if (!OUTCOMES.has(result?.outcome)) throw new Error('Codex 重置结果无效');
   return result.outcome;
 }

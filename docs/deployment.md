@@ -119,3 +119,19 @@ systemd-run --user --unit=paseo-quota-upgrade \
 ## 升级回退
 
 失败时脚本按 `switchProgress` 恢复已改写的单元（回读校验）。恢复或 `daemon-reload` 失败时不重启任何服务，记 `rollback_needs_attention` 并在 `serviceStates` 记录各服务实际状态；若候选 daemon 已启动失败，此时可能没有可用的 Paseo，需要人工处理。否则只重启本次已重启过的服务，再按同一标准核验旧版本；全部确认才记 `rolled_back`。手动回退：从 `~/.local/state/paseo-quota-deploy/backup-upgrade-*/` 恢复两个单元文件，`systemctl --user daemon-reload`，依次重启 guard 与 daemon 并确认状态。
+
+## 2026-10-20 Mac 0.12.0 插件兼容修复
+
+生产插件仍位于 `.local/release-recovery-notify-20261020/plugin`。经隔离验证，将该目录的 `paseo-plugin.json` 中 `requirements.paseo` 从 `>=0.11.2 <0.12.0` 改为 `>=0.11.2 <0.13.0`，通过插件 reload 热加载。生产仅这一文件变化，客户端 bundle 字节不变，daemon/guard PID、daemon 配置和保护设置均未变化，状态 RPC 与 enforce 核验通过。原 manifest 已备份；记录见 `.local/reports/plugin-compat-012/deployment.json`。之前本地的逐卡 Reset、暂停通知合并和自动恢复逻辑未随此兼容修复发布。Mac 实际显示需由客户端确认。
+
+## 额度恢复与逐卡 Reset 发布
+
+当 `src/bridge.mjs` 与正在运行的 Paseo release 完全一致时，可以仅发布新的 guard 与插件，不重启 Paseo daemon：
+
+1. 完整测试、插件类型检查、0.12.0 加载验证通过后提交代码；把该提交的 `src/`、`plugin/`、`config/` 复制到独立 release，记录提交和文件哈希。
+2. 在临时 SQLite、独立 socket 和模拟桥接上验证候选 guard 的暂停通知合并、自动恢复及逐卡 Reset。测试不调用模型或真实推送。
+3. 持有 `rollout.lock`，备份 guard 单元、插件登记配置、guard 状态库和设置；只替换 guard 单元的入口路径并快速重启 guard，确认健康和 enforce 连接。Paseo 主进程保持不变。
+4. 将 quota-guard 插件登记切换到已验证的新目录；确认 running、目录内容与候选一致、Mac 0.12.0 兼容、状态 RPC 正常，以及原阈值/开关/daemon 身份未改变。失败时恢复旧插件目录和 guard 单元。
+5. 使用部署报告记录完成状态；客户端重新获取 catalog 后显示新界面。服务端验证不能代替 Mac 实际显示及手机通知送达确认。
+
+此次发布包含逐卡 Reset、暂停通知合并、额度恢复通知和自动解除额度保护暂停；保留手动暂停，不自动续跑旧任务。
