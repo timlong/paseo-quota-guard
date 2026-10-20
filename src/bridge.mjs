@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { call, serve } from './ipc.mjs';
 import { protectionDisabled } from './settings.mjs';
+import { boundedCall, stopClaudeSubtasks } from './claude-task-stop.mjs';
 
 const tracked = new Set();
 let host = null;
@@ -77,15 +78,17 @@ export async function startBridge({ manager, runtime, paseoHome, serverId, logge
       const inner = nativeFor(a);
       try {
         const tasks = children(a);
-        if (inner.query?.stopTask) {
-          for (const task of tasks) {
-            try { await inner.query.stopTask(task.id); } catch { failures.push(`${a.id}:子任务中断失败`); }
-          }
-        }
-        // Direct interrupt also catches provider work after Paseo's foreground bookkeeping settled.
-        await Promise.race([inner.interrupt(), new Promise((_, reject) => {
-          const t = setTimeout(() => reject(new Error('中断超时')), 10000); t.unref();
-        })]);
+        await Promise.all([
+          (async () => {
+            if (protectedScope(inner)?.provider !== 'claude') return;
+            const errors = await stopClaudeSubtasks(inner, tasks);
+            failures.push(...errors.map(error => `${a.id}:${error}`));
+          })(),
+          // Claude's main-turn interrupt can spare background work, or do nothing
+          // for an idle parent. Stop children explicitly and verify both below.
+          boundedCall(() => inner.interrupt(), 10000)
+            .catch(() => { failures.push(`${a.id}:中断未确认`); }),
+        ]);
       } catch { failures.push(`${a.id}:中断未确认`); }
     }));
     const deadline = Date.now() + 5000;

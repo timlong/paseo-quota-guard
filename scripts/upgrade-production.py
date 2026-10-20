@@ -35,6 +35,7 @@ class Cfg:
     verify_seconds: float = 420  # longer than the guard's 300 s idle poll, in case reconnect fails
     reconnect_interval: float = 30
     verify_interval: float = 5
+    daemon_only: bool = False
 
 
 def atomic_write(path, text, mode=0o644):
@@ -190,15 +191,17 @@ class Upgrade:
             texts = {u: self.unit_path(u).read_text() for u in UNITS}
         except OSError:
             raise Abort('parse_units', '单元文件不可读')
-        names = {self.unit_release(t) for t in texts.values()}
+        names = {self.unit_release(texts[u]) for u in
+                 ((UNITS[1],) if self.cfg.daemon_only else UNITS)}
         if len(names) != 1:
             raise Abort('parse_units', '两个单元指向不同的发布目录')
         return texts, names.pop()
 
     @staticmethod
-    def same_tree(a, b):
+    def same_tree(a, b, ignore=()):
         def files(d):
-            return {p.relative_to(d) for p in d.rglob('*') if p.is_file() and 'node_modules' not in p.relative_to(d).parts}
+            return {p.relative_to(d) for p in d.rglob('*') if p.is_file() and
+                    'node_modules' not in p.relative_to(d).parts and str(p.relative_to(d)) not in ignore}
         if not a.is_dir() or not b.is_dir():
             return False
         try:
@@ -219,6 +222,12 @@ class Upgrade:
         if not all(self.same_tree(a, b) for a, b in pairs):
             raise Abort('compare', '源码与发布包不一致')
         texts, old = self.read_units()
+        if self.cfg.daemon_only:
+            guard_release = root / '.local' / self.unit_release(texts[UNITS[0]])
+            if not self.same_tree(guard_release / 'guard', t / 'guard',
+                                  ignore=('bridge.mjs', 'claude-task-stop.mjs')):
+                raise Abort('compare', 'daemon-only 不允许遗漏 guard 服务代码变更')
+            self.unchanged_guard_unit = texts[UNITS[0]]
         if old == t.name:
             raise Abort('parse_units', '服务已指向目标发布目录')
         m = re.search(r'^Environment=QUOTA_GUARD_CONFIG=(\S+)$', texts[UNITS[0]], re.M)
@@ -268,6 +277,8 @@ class Upgrade:
             try:
                 if self.read_units()[1] != release:
                     permanent.append('单元未指向预期发布目录')
+                if self.cfg.daemon_only and self.read_units()[0][UNITS[0]] != self.unchanged_guard_unit:
+                    permanent.append('未参与切换的 guard 单元已改变')
             except Abort:
                 permanent.append('单元文件不可读或无法解析')
             if self.identity() != ident:
@@ -291,13 +302,14 @@ class Upgrade:
             self.sys.sleep(self.cfg.verify_interval)
 
     def switch(self, texts, old, progress):
-        for u in UNITS:
+        units = (UNITS[1],) if self.cfg.daemon_only else UNITS
+        for u in units:
             progress['touched'].append(u)  # before writing: a failed read-back may follow a completed replace
             if not self.sys.write(self.unit_path(u), texts[u].replace(f'/.local/{old}/', f'/.local/{self.target.name}/')):
                 raise Abort('write_units', f'{u} 写入失败')
         if self.sys.run(['systemctl', '--user', 'daemon-reload'])[0] != 0:
             raise Abort('daemon_reload', 'daemon-reload 失败')
-        for u in UNITS:
+        for u in units:
             progress['restarted'].append(u)
             if self.sys.run(['systemctl', '--user', 'restart', u], 180)[0] != 0:
                 raise Abort('restart', f'{u} 重启失败')
@@ -399,12 +411,14 @@ def main(argv=None):
     parser.add_argument('--release')
     parser.add_argument('--preflight', action='store_true')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--daemon-only', action='store_true',
+                        help='仅切换 daemon 中的 bridge；要求 guard 其余源码完全一致')
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
     if not args.release:
         parser.error('--release is required')
-    cfg, target = Cfg(), Path(args.release).resolve()
+    cfg, target = Cfg(daemon_only=args.daemon_only), Path(args.release).resolve()
     if args.preflight:
         print(json.dumps(preflight(cfg, target), ensure_ascii=False))
         return 0
@@ -552,6 +566,33 @@ def self_test():
         assert code == 0 and r['status'] == 'success' and on('rel-new'), r
         assert ops == BACKUP + SWITCH and f.clock >= 60 and f.reconnects >= 1, (ops, f.reconnects)
     case({}, ok)
+
+    # Bridge-only deployments may start with guard and daemon on different releases.
+    # Preserve the guard unit and process on both success and rollback.
+    for fails in (False, True):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = setup(Path(d)); cfg.daemon_only = True
+            guard_unit = cfg.unit_dir / UNITS[0]
+            guard_unit.write_text(guard_unit.read_text().replace('/rel-old/', '/rel-new/'))
+            before = guard_unit.read_bytes()
+            scenario = {'restart_fail': {UNITS[1]: 1}} if fails else {}
+            fake = FakeSys(scenario, cfg.unit_dir)
+            code = Timed(cfg, fake, cfg.root / '.local/rel-new').execute()
+            r = json.loads(cfg.report.read_text())
+            assert r['status'] == ('rolled_back' if fails else 'success'), r
+            assert guard_unit.read_bytes() == before
+            assert f'write {G}' not in fake.ops and f'restart {G}' not in fake.ops, fake.ops
+            expected = 'rel-old' if fails else 'rel-new'
+            assert f'/.local/{expected}/' in (cfg.unit_dir / UNITS[1]).read_text()
+            assert code == (1 if fails else 0)
+
+    with tempfile.TemporaryDirectory() as d:
+        cfg = setup(Path(d)); cfg.daemon_only = True
+        (cfg.root / '.local/rel-old/guard/f.txt').write_text('old guard code')
+        fake = FakeSys({}, cfg.unit_dir)
+        assert Timed(cfg, fake, cfg.root / '.local/rel-new').execute() == 1
+        assert json.loads(cfg.report.read_text())['stage'] == 'compare'
+        assert fake.ops == [], 'guard 代码存在其他差异时不得切换'
 
     def own_poll_connects(code, r, on, ops, f):
         assert r['status'] == 'success' and on('rel-new') and ops == BACKUP + SWITCH, (r, ops)

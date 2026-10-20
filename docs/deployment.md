@@ -18,6 +18,8 @@ node scripts/verify-release.mjs
 
 stage 目标必须不存在；重新生成时选择新的 release 路径，保留旧版本。它复制本机固定的 Paseo 0.11.2 及依赖，用原文件哈希和锚点验证补丁，然后复制 guard 核心、配置及插件。不会启动或停止生产 daemon。
 
+仅修改 daemon 内的 bridge 时，可使用 `scripts/upgrade-production.py --daemon-only --release <候选目录>`。该模式支持 guard 与 daemon 已处于不同发布目录，仍要求候选通过隔离验证，并拒绝遗漏任何非 bridge 的 guard 源码差异。等待全部会话稳定空闲 60 秒后，只切换和重启 daemon；guard 单元与插件路径保持原样，失败时仅回退被切换的服务。可先加 `--preflight` 做只读比较；`--self-test` 覆盖切换、失败回退及错误范围拦截。bridge 随 daemon 加载，只重启 guard 不会使这类修复生效。
+
 ## 隔离验收
 
 在全新 Paseo home 配置独立 loopback 端口并禁用 relay。不要把生产配置、会话库或 push token 复制到测试 home。

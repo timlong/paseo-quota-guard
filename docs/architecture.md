@@ -56,7 +56,9 @@ Claude 必须两个窗口都有效；Codex 按用户确认只保护已返回的�
 
 保护开启且账户未知、guard 失联、模式不匹配时，enforce 模式拒绝请求；observe 模式不拦截。`/admit` 不等待外部采集或中断，避免 daemon 与 guard 相互等待。
 
-中断时重新确认账户归属，调用原生 session interrupt；Claude 已暴露的 `query.stopTask()` 可用于登记的后台任务。核验原生运行字段及 provider 子任务表。未确认停止时不强杀、不伪造任务结束。内部未登记或上游未正确上报的自主工作仍是需要真实 provider 验收的边界。
+中断时重新确认账户归属，调用原生 session interrupt。Claude 的 provider 子任务表使用 canonical `tool_use_id`（`toolu_…`），而 `query.stopTask()` 要求 `task_started.task_id`；必须反查当前原生会话 `taskProtocolSource.subagentIdByTaskId` 的路由，再逐个停止。不能把界面 ID、其他会话的 ID 或仅从历史记录猜测的 ID 传给停止接口。当前适配在隔离发布包中通过真实 `ClaudeTaskProtocolSource` 验证，覆盖后台、嵌套和别名任务。
+
+主回合 interrupt 在父会话 idle 时可能不执行请求，且开启独立任务停止能力后可以保留后台任务，因此它不能替代逐任务停止。后台停止与主回合中断并行，每个请求限时 10 秒；一个卡住的子任务不阻塞其他停止请求。路由缺失、接口不可用、拒绝或超时都返回未确认，不伪造成功。SDK 返回后继续核验原生运行字段及 provider 子任务表，仍运行则保持 partial，后续循环重试。自动保护不直接强杀进程；内部未登记或上游未正确上报的自主工作仍是需要真实 provider 验收的边界。
 
 ## 轮询、失联与恢复
 

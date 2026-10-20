@@ -187,6 +187,47 @@ test('服务端检查发现子任务仍运行，不得宣称已暂停', async t 
    runtime:{listUsageReports:async()=>[report()]},paseoHome:home,serverId:'test',watchdogMs:100000});t.after(()=>bridge.close());
  const result=await call(join(home,'paseo.sock'),'/interrupt',{accountId:'claude:a'});
  assert.equal(result.complete,false);assert.deepEqual(result.pending,['agent']);
+ assert.match(result.failures[0], /子任务停止接口不可用/);
+});
+
+test('空闲主会话的后台任务按原生 ID 停止，收到终态后才能确认暂停', async t => {
+ const home=temp(t); let status='running'; const stopped=[];
+ const session={
+  usageSession:()=>({provider:'claude',sessionKey:'background-native',env:{}}),
+  interrupt:async()=>{}, mainTurnInFlight:false,
+  taskProtocolSource:{subagentIdByTaskId:new Map([['native-background','toolu_background']])},
+  query:{async stopTask(id) {
+   stopped.push(id);
+   assert.equal(id,'native-background');
+   setTimeout(()=>{status='canceled';},25);
+  }},
+ };
+ const a={id:'agent',session,provider:'claude',workspaceId:'w'};
+ const bridge=await startBridge({home,mode:'enforce',
+  manager:{agents:new Map([['agent',a]]),providerSubagents:{list:()=>[{id:'toolu_background',status}]}},
+  runtime:{listUsageReports:async()=>[report()]},paseoHome:home,serverId:'test',watchdogMs:100000});
+ t.after(()=>bridge.close());
+ const result=await call(join(home,'paseo.sock'),'/interrupt',{accountId:'claude:a'});
+ assert.deepEqual(stopped,['native-background']);
+ assert.equal(status,'canceled'); assert.equal(result.complete,true); assert.deepEqual(result.pending,[]);
+ assert.deepEqual(result.failures,[]);
+});
+
+test('stopTask 成功返回但后台任务仍运行时保持暂停未完成', async t => {
+ const home=temp(t); let stops=0;
+ const session={
+  usageSession:()=>({provider:'claude',sessionKey:'background-unconfirmed',env:{}}),
+  interrupt:async()=>{}, mainTurnInFlight:false,
+  taskProtocolSource:{subagentIdByTaskId:new Map([['native-background','toolu_background']])},
+  query:{async stopTask(id){assert.equal(id,'native-background');stops++;}},
+ };
+ const a={id:'agent',session,provider:'claude'};
+ const bridge=await startBridge({home,mode:'enforce',
+  manager:{agents:new Map([['agent',a]]),providerSubagents:{list:()=>[{id:'toolu_background',status:'running'}]}},
+  runtime:{listUsageReports:async()=>[report()]},paseoHome:home,serverId:'test',watchdogMs:100000});
+ t.after(()=>bridge.close());
+ const result=await call(join(home,'paseo.sock'),'/interrupt',{accountId:'claude:a'});
+ assert.equal(stops,1); assert.equal(result.complete,false); assert.deepEqual(result.pending,['agent']);
 });
 
 test('未知额度源及插件误用不能变成默认放行', async t => {

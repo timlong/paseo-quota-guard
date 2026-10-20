@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,6 +17,7 @@ for (const f of manifest.files) {
   assert.equal(createHash('sha256').update(readFileSync(join(server, f.file))).digest('hex'), f.after, `after 必须等于实际文件哈希：${f.file}`);
 }
 const testHome = join(server, '.quota-verification');
+const bridgeHome = mkdtempSync(join(tmpdir(), 'qgs-')); // Unix sockets have a short pathname limit.
 mkdirSync(testHome, { recursive: true });
 try {
   const { build } = await import(pathToFileURL(join(release, 'node_modules/esbuild/lib/main.js')).href);
@@ -129,5 +131,51 @@ try {
   const codexSession = wrapSessionProvider('codex', codexInner);
   const plain = codexSession.tryHandleOutOfBand('普通输入'); assert.equal(plain, null); assert.ok(!(plain instanceof Promise));
   const compact = codexSession.tryHandleOutOfBand('/compact'); assert.ok(compact && typeof compact.run === 'function'); assert.ok(!(compact instanceof Promise));
-  console.log('Release 验证通过：4 个文件哈希、真实 provider 包装入口、Codex Retry-After 冷却与恢复、Codex 带外契约、Claude 身份兜底缓存。未调用真实模型或额度 API。');
-} finally { rmSync(testHome, { recursive: true, force: true }); }
+
+  // Exercise the installed provider's actual task protocol, including aliases and
+  // nested tasks, against the bridge shipped in this candidate. No CLI/model runs.
+  const { ClaudeTaskProtocolSource } = await import(pathToFileURL(join(server,
+    'dist/server/server/agent/providers/claude/subagents/live-source.js')).href);
+  const { startBridge } = await import(pathToFileURL(join(release, 'guard/bridge.mjs')).href);
+  const { call } = await import(pathToFileURL(join(release, 'guard/ipc.mjs')).href);
+  const protocol = new ClaudeTaskProtocolSource();
+  const descriptors = new Map();
+  const apply = observations => {
+    for (const o of observations) {
+      if (o.kind === 'declared') descriptors.set(o.id, { id: o.id, status: 'running' });
+      if (o.kind === 'status') descriptors.get(o.id).status = o.status;
+    }
+  };
+  const started = (task_id, tool_use_id) => ({ type: 'system', subtype: 'task_started',
+    task_id, tool_use_id, task_type: 'local_agent', subagent_type: 'general-purpose', is_backgrounded: true });
+  apply(protocol.observe(started('native-parent', 'toolu_parent')));
+  apply(protocol.observe(started('native-parent', 'toolu_alias')));
+  protocol.ownerSubagentIdByToolUseId.set('toolu_nested', 'toolu_parent');
+  apply(protocol.observe(started('native-nested', 'toolu_nested')));
+  const stopped = [];
+  const native = {
+    usageSession: () => ({ provider: 'claude', sessionKey: 'stop-verification', env: {} }),
+    taskProtocolSource: protocol, mainTurnInFlight: false, async interrupt() {},
+    query: { async stopTask(id) {
+      assert.ok(['native-parent', 'native-nested'].includes(id), 'stopTask 必须使用原生任务 ID');
+      stopped.push(id);
+      apply(protocol.observe({ type: 'system', subtype: 'task_notification', task_id: id, status: 'stopped' }));
+    } },
+    async close() {},
+  };
+  const guarded = wrapSessionProvider('claude', native);
+  const bridge = await startBridge({ home: bridgeHome, mode: 'enforce', paseoHome: bridgeHome, serverId: 'test',
+    manager: { agents: new Map([['agent', { id: 'agent', provider: 'claude', session: guarded }]]),
+      providerSubagents: { list: () => [...descriptors.values()] } },
+    runtime: { listUsageReports: async () => [{ id: 'claude:test', sourceId: 'claude' }] }, watchdogMs: 100000 });
+  try {
+    const result = await call(join(bridgeHome, 'paseo.sock'), '/interrupt', { accountId: 'claude:test' });
+    assert.equal(result.complete, true); assert.deepEqual(result.pending, []); assert.deepEqual(result.failures, []);
+    assert.deepEqual(stopped.sort(), ['native-nested', 'native-parent']);
+    assert.ok([...descriptors.values()].every(d => d.status === 'canceled'));
+  } finally { await bridge.close(); await guarded.close(); }
+  console.log('Release 验证通过：4 个文件哈希、真实 provider 包装入口、Codex 冷却与带外契约、Claude 身份缓存及原生后台/嵌套任务停止路由。未调用真实模型或额度 API。');
+} finally {
+  rmSync(testHome, { recursive: true, force: true });
+  rmSync(bridgeHome, { recursive: true, force: true });
+}
