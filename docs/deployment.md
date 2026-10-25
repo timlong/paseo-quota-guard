@@ -137,3 +137,24 @@ systemd-run --user --unit=paseo-quota-upgrade \
 5. 使用部署报告记录完成状态；客户端重新获取 catalog 后显示新界面。服务端验证不能代替 Mac 实际显示及手机通知送达确认。
 
 此次发布包含逐卡 Reset、暂停通知合并、额度恢复通知和自动解除额度保护暂停；保留手动暂停，不自动续跑旧任务。
+
+## 2026-10-25 Mac 0.13.0 插件兼容修复
+
+本次入口消失发生在客户端升级到 0.13.0 后；服务端插件仍为 running，保护仍在 enforce。原因是旧 manifest 声明 `>=0.11.2 <0.13.0`，客户端 registry 在安装 catalog 时拒绝加载。重装同一声明不能解决问题。
+
+已在独立目录安装官方 `@getpaseo/plugin` / `@getpaseo/protocol` 0.13.0，并使用 [v0.13.0 源码](https://github.com/getpaseo/paseo/tree/v0.13.0/packages/app/src/plugins) 中实际的 `registry.ts`、`evaluate.ts`、`icons.ts` 验证。SDK、加载器和注册逻辑为真实实现；原生 UI 组件及 RPC 传输采用测试适配，不调用模型，也不代表已经观察到 Mac 屏幕。验证覆盖旧声明拒绝、新声明热加载恢复、侧栏与页面渲染、status RPC、侧栏导航、`/quota`、断开清理与重连注册。
+
+源码与生产 manifest 的兼容范围均更新为 `>=0.11.2 <0.14.0`。在持有生产变更锁并备份 manifest 后，reload `quota-guard`，确认新 catalog 可由 0.13.0 接受、插件 running、保护 ready。只修改 manifest，客户端 bundle、daemon/guard PID、daemon 配置与用户设置均保持不变。报告：`.local/reports/plugin-compat-013/result.json` 和 `deployment.json`。这里只验证客户端兼容性，服务端 bridge 仍绑定已适配的 0.11.2，不代表可以直接升级服务端。
+
+隔离检查入口已经纳入仓库，便于今后升级时复现加载问题。准备 fixture 的依赖与官方 tag 源码后执行：
+
+```bash
+# fixture/package.json 和 node_modules 中安装对应版本的 SDK/protocol；
+# 另需 react、react-test-renderer、typescript、zod。
+# fixture/host/ 下放该 tag 的 registry.ts、evaluate.ts、icons.ts 原文件。
+# plugin-dir 为隔离候选目录，不能为未修改的生产目录。
+node scripts/verify-plugin-compat.mjs /tmp/paseo-plugin-compat-013 0.13.0 \
+  /tmp/paseo-plugin-compat-013/production /tmp/paseo-plugin-compat-013/development
+```
+
+检查会保存上游源码哈希和结果到 fixture/result.json。升级客户端前应验证实际加载器与 SDK，再更新经过验证的兼容范围；无需重复安装插件。此命令不修改生产，不自动放行未验证的未来版本。
