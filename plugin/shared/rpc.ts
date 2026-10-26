@@ -1,13 +1,14 @@
 import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
+const threshold = z.object({ warn: z.number(), pause: z.number() }).strict();
 
 export const control = defineRpc({
   name: 'quota.control',
   input: z.object({ action: z.enum(['status', 'refresh', 'pause', 'resume', 'test-push', 'settings', 'codex-credits', 'codex-reset']), accountId: z.string().max(256).optional(),
     creditId: z.string().min(1).max(256).optional(), requestId: z.string().regex(/^[a-zA-Z0-9_-]{8,128}$/).optional(), force: z.boolean().optional(),
     settings: z.object({ revision: z.number().int().nonnegative(), enabled: z.boolean(), notifications: z.boolean(),
-      thresholds: z.object({ claude: z.object({ warn: z.number(), pause: z.number() }).strict(),
-        codex: z.object({ warn: z.number(), pause: z.number() }).strict() }).strict(),
+      thresholds: z.object({ claude: threshold.extend({ windows: z.object({ five_hour: threshold, weekly: threshold }).strict().optional() }).strict(),
+        codex: threshold }).strict(),
     }).strict().optional(),
   }).strict(),
   output: z.record(z.string(), z.unknown()),
@@ -30,7 +31,8 @@ export interface CodexCredits {
 export interface Snapshot {
   enabled: boolean; settingsRevision: number;
   mode: string; notifications: boolean; lastError?: string | null; enforcementReady?: boolean;
-  accounts: Account[]; thresholds: Record<string, { warn: number; pause: number }>;
+  accounts: Account[]; thresholds: Record<string, { warn: number; pause: number; windows?: Record<'five_hour' | 'weekly', { warn: number; pause: number }> }>;
   agents: { id: string; protection: string }[];
+  collectionPolicy?: { freshMs: number };
   codexCredits?: Record<string, CodexCredits>;
 }

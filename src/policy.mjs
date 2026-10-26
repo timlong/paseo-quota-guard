@@ -1,9 +1,22 @@
+export function validateThresholds(thresholds) {
+  const valid = t => t && Number.isFinite(t.warn) && Number.isFinite(t.pause) &&
+    t.warn >= 0 && t.warn < t.pause && t.pause <= 100;
+  for (const p of ['claude', 'codex']) {
+    const t = thresholds?.[p];
+    if (!valid(t)) throw new Error(`${p} 阈值无效`);
+    if (t.windows !== undefined && (p !== 'claude' || !t.windows ||
+        Object.keys(t.windows).some(id => !['five_hour', 'weekly'].includes(id)) ||
+        !['five_hour', 'weekly'].every(id => valid(t.windows[id])))) throw new Error(`${p} 分窗口阈值无效`);
+  }
+}
+
+export const windowThreshold = (config, provider, id) =>
+  config.thresholds[provider].windows?.[id] ?? config.thresholds[provider];
+
 export function validateConfig(c) {
   if (!['observe', 'enforce'].includes(c.mode)) throw new Error('mode 必须为 observe/enforce');
+  validateThresholds(c.thresholds);
   for (const p of ['claude', 'codex']) {
-    const t = c.thresholds?.[p];
-    if (!t || !Number.isFinite(t.warn) || !Number.isFinite(t.pause) || t.warn < 0 || t.warn >= t.pause || t.pause > 100)
-      throw new Error(`${p} 阈值无效`);
     if (!['both', 'available'].includes(c.windowPolicy?.[p])) throw new Error(`${p} 窗口规则无效`);
   }
   for (const k of ['activePollMs', 'idlePollMs', 'staleMs', 'heartbeatMs', 'heartbeatTimeoutMs'])
@@ -51,19 +64,27 @@ function reportProblem(report) {
 
 export function assess(account, config, now) {
   const fresh = account.fetchedAt != null && now - account.fetchedAt < config.staleMs && account.fetchedAt <= now + 5000;
-  const t = config.thresholds[account.provider];
   const enough = config.windowPolicy[account.provider] === 'available' ? account.windows.length >= 1 : account.windows.length === 2;
   if (!fresh || !enough)
     return { level: 'unknown', canResume: false, reason: '额度数据缺失或过期', resumeReason: '额度数据缺失或过期，请成功刷新后恢复', usingCachedReading: false };
-  const high = account.windows.reduce((a, b) => a.used >= b.used ? a : b);
+  const windows = account.windows.map(w => {
+    const t = windowThreshold(config, account.provider, w.id);
+    return { ...w, level: w.used >= t.pause ? 'pause' : w.used >= t.warn ? 'warning' : 'normal',
+      resumeBelow: t.pause - Math.min(config.recoveryMargin, t.pause / 2) };
+  });
+  const severity = { normal: 0, warning: 1, pause: 2 };
+  const high = windows.reduce((a, b) => severity[b.level] > severity[a.level] ||
+    (severity[b.level] === severity[a.level] && b.used > a.used) ? b : a);
   const usingCachedReading = Boolean(account.error) && ['rate_limited', 'timeout'].includes(account.errorCode);
-  const resumeBelow = t.pause - Math.min(config.recoveryMargin, t.pause / 2);
-  const below = account.windows.every(w => w.used < resumeBelow);
+  const below = windows.every(w => w.used < w.resumeBelow);
+  const recovery = windows.every(w => w.resumeBelow === windows[0].resumeBelow)
+    ? `所有受保护窗口须低于 ${windows[0].resumeBelow}% 才能恢复`
+    : windows.map(w => `${w.id === 'weekly' ? '周' : '5 小时'}须低于 ${w.resumeBelow}%`).join('，') + ' 才能恢复';
   const usable = !account.error || usingCachedReading;
   return {
-    level: high.used >= t.pause ? 'pause' : high.used >= t.warn ? 'warning' : 'normal',
+    level: high.level,
     canResume: usable && below,
-    resumeReason: !usable ? `${account.error}，请成功刷新后恢复` : !below ? `所有受保护窗口须低于 ${resumeBelow}% 才能恢复` : null,
+    resumeReason: !usable ? `${account.error}，请成功刷新后恢复` : !below ? recovery : null,
     usingCachedReading,
     reason: `${high.id === 'weekly' ? '周' : '5 小时'}额度已用 ${high.used}%`,
   };
@@ -72,5 +93,8 @@ export function assess(account, config, now) {
 export function reportText(a, c) {
   const name = a.provider === 'claude' ? 'Claude' : 'Codex';
   const usage = a.windows.map(w => `${w.id === 'weekly' ? '周' : '5 小时'} ${w.used}%`).join('，');
-  return `${name}：${usage || '额度不可用'}。任一达到 ${c.thresholds[a.provider].pause}% 自动暂停。`;
+  const limit = c.thresholds[a.provider].windows
+    ? `5 小时达到 ${windowThreshold(c, a.provider, 'five_hour').pause}% 或周达到 ${windowThreshold(c, a.provider, 'weekly').pause}% 自动暂停`
+    : `任一达到 ${c.thresholds[a.provider].pause}% 自动暂停`;
+  return `${name}：${usage || '额度不可用'}。${limit}。`;
 }

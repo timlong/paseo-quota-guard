@@ -43,7 +43,9 @@ export class Engine {
     const details = {
       paused: a.stopDetails?.checkedCount === 0 ? '新请求已受限，本次未发现可中断的关联任务。' : '新请求已受限；本次已核验的关联任务已停止。',
       partial: '新请求已受限，部分关联任务未停止或无法确认，请打开页面检查。',
-      recovered: '额度已恢复到可用范围，已自动解除额度保护暂停。可以进入原会话继续，旧任务不会自动续跑。',
+      recovered: extra.recoveryCause === 'unavailable'
+        ? '额度查询已恢复，新读数满足恢复条件，已自动解除异常暂停。可以进入原会话继续，旧任务不会自动续跑。'
+        : '额度已恢复到可用范围，已自动解除额度保护暂停。可以进入原会话继续，旧任务不会自动续跑。',
     };
     const context = ['paused', 'partial'].includes(kind)
       ? `${a.pauseContext?.usage ?? reportText(a, this.config)} 原因：${a.reason}。` : reportText(a, this.config);
@@ -81,17 +83,24 @@ export class Engine {
   evaluate(a, now, refreshed = false) {
     if (this.config.enabled === false) { this.store.save(a); return; }
     const q = assess(a, this.config, now);
+    const health = q.level === 'unknown' ? 'unavailable' : a.errorCode ?? 'ok';
+    if (a.collectionState !== health) {
+      this.store.audit('collection_state', { accountId: a.id, state: health, errorCode: a.errorCode ?? null,
+        lastSuccessAt: a.fetchedAt, ageMs: a.fetchedAt == null ? null : Math.max(0, now - a.fetchedAt) }, now);
+      a.collectionState = health;
+    }
     if (!a.locked && (q.level === 'pause' || q.level === 'unknown')) this.lock(a, q.reason, q.level === 'pause' ? 'quota' : 'unavailable');
     if (a.locked && a.pauseCause === 'unavailable' && refreshed && !a.error && q.level === 'pause') {
       a.pauseCause = 'quota'; a.reason = q.reason;
       a.pauseContext = { usage: reportText(a, this.config) };
     }
-    const recovered = this.config.mode === 'enforce' && a.locked && a.pauseCause === 'quota' &&
+    const recovered = this.config.mode === 'enforce' && a.locked && ['quota', 'unavailable'].includes(a.pauseCause) &&
       refreshed && !a.error && q.canResume && a.fetchedAt >= a.stopStartedAt;
     if (recovered) {
+      const recoveryCause = a.pauseCause;
       this.unlock(a);
-      this.notice(a, 'recovered', a.epoch, '额度已恢复，已自动解除暂停');
-      this.store.audit('auto_resumed', { accountId: a.id, epoch: a.epoch }, now);
+      this.notice(a, 'recovered', a.epoch, recoveryCause === 'unavailable' ? '额度查询已恢复，已自动解除暂停' : '额度已恢复，已自动解除暂停', { recoveryCause });
+      this.store.audit('auto_resumed', { accountId: a.id, epoch: a.epoch, cause: recoveryCause }, now);
     }
     const ready = a.locked && q.canResume;
     a.ready = ready;
@@ -109,7 +118,8 @@ export class Engine {
     a.stopDetails = null;
     a.pauseCause = cause; a.stopStartedAt = this.now();
     a.pauseContext = { usage: reportText(a, this.config) };
-    this.store.audit('pause_requested', { accountId: a.id, reason, mode: this.config.mode }, this.now());
+    this.store.audit('pause_requested', { accountId: a.id, reason, cause, mode: this.config.mode,
+      errorCode: a.errorCode ?? null, lastSuccessAt: a.fetchedAt, windows: a.windows }, this.now());
   }
   pause(id) {
     if (this.config.enabled === false) throw new Error('额度保护已关闭');
@@ -207,6 +217,7 @@ export class Engine {
       mode: this.config.mode, notifications: this.config.notifications, updatedAt: now, lastSnapshot: this.lastSnapshot,
       enabled: this.config.enabled !== false, settingsRevision: this.config.settingsRevision ?? 0,
       thresholds: this.config.thresholds,
+      collectionPolicy: { freshMs: this.config.staleMs },
       accounts: [...this.accounts.values()].filter(a => !this.isHidden(a, now)).map(a => {
         const assessment = assess(a, this.config, now);
         return { ...a, ready: a.locked && assessment.canResume, assessment };

@@ -409,7 +409,7 @@ test('自动恢复不依赖推送成功；通知重试跨重启，重新暂停�
   assert.deepEqual(recovery.map(r => r.status), ['submitted', 'cancelled']);
 });
 
-test('关闭通知仍自动恢复但不推送；观察模式和数据缺失锁定不冒充额度恢复', async t => {
+test('关闭通知仍自动恢复；观察模式不通知；异常暂停恢复使用独立文案', async t => {
   const f = await serviceFixture(t, { used: 91 });
   await f.settings({ notifications: false }); const count = f.received.length;
   f.advance(1000); f.setInput(reading(f.now(), 10)); await f.service.tick(true);
@@ -420,8 +420,11 @@ test('关闭通知仍自动恢复但不推送；观察模式和数据缺失锁�
   assert.equal(g.messages().length, 0);
   const h = fixture(t);
   h.engine.ingest([failed(h.now())]); h.advance(1000); h.engine.ingest([reading(h.now(), 10)]);
-  assert.equal(h.engine.require('claude:a').locked, true);
-  assert.equal(h.messages().filter(m => m.kind === 'recovered').length, 0);
+  assert.equal(h.engine.require('claude:a').locked, false);
+  const recovery = h.messages().filter(m => m.kind === 'recovered');
+  assert.equal(recovery.length, 1);
+  assert.match(recovery[0].title, /额度查询已恢复/);
+  assert.equal(recovery[0].recoveryCause, 'unavailable');
   h.advance(1000); h.engine.ingest([reading(h.now(), 91)]);
   h.advance(1000); h.engine.ingest([reading(h.now(), 10)]);
   assert.equal(h.engine.require('claude:a').locked, false, '随后确认真实超限后可以自动恢复');

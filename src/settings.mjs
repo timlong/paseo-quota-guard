@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { validateConfig } from './policy.mjs';
+import { validateConfig, validateThresholds } from './policy.mjs';
 
 export function writeSettings(home, settings) {
   const path = join(home, 'settings.json');
@@ -21,11 +21,7 @@ export function readSettings(home) {
     const s = JSON.parse(readFileSync(join(home, 'settings.json'), 'utf8'));
     if (typeof s.enabled !== 'boolean' || typeof s.notifications !== 'boolean' || !Number.isSafeInteger(s.revision) || s.revision < 1)
       throw new Error('已保存的设置无效');
-    for (const p of ['claude', 'codex']) {
-      const t = s.thresholds?.[p];
-      if (!t || !Number.isFinite(t.warn) || !Number.isFinite(t.pause) || t.warn < 0 || t.warn >= t.pause || t.pause > 100)
-        throw new Error('已保存的阈值无效');
-    }
+    validateThresholds(s.thresholds);
     return s;
   } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
 }
@@ -40,6 +36,8 @@ export function saveSettings(home, current, input) {
       input.revision !== current.settingsRevision || typeof input.enabled !== 'boolean')
     throw new Error('设置格式无效或已被其他设备修改，请刷新后重试');
   const candidate = validateConfig({ ...current, enabled: input.enabled, notifications: input.notifications, thresholds: input.thresholds });
+  if (current.thresholds.claude.windows && !candidate.thresholds.claude.windows)
+    throw new Error('当前已使用分窗口阈值，请刷新客户端后重试');
   const settings = { enabled: candidate.enabled, notifications: candidate.notifications,
     thresholds: candidate.thresholds, revision: current.settingsRevision + 1 };
   writeSettings(home, settings);

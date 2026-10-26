@@ -1,3 +1,4 @@
+import { windowThreshold } from './policy.mjs';
 // A fixed anchor tolerates provider timestamp jitter without accumulating drift.
 const RESET_TOLERANCE_MS = 60000;
 const resetTime = value => {
@@ -14,9 +15,9 @@ export function updateWarningCycles(account, config, now) {
   migrateWarnings(account);
   // Only a valid, fresh observation can establish a new period or rearm a missing-reset warning.
   if (account.error || account.fetchedAt === null || now - account.fetchedAt >= config.staleMs) return [];
-  const warning = config.thresholds[account.provider].warn;
   const due = [];
   for (const w of account.windows) {
+    const warning = windowThreshold(config, account.provider, w.id).warn;
     const reset = resetTime(w.reset);
     let cycle = account.warningCycles[w.id];
     if (!cycle) cycle = account.warningCycles[w.id] = { anchor: reset, generation: 1, warned: false, observedAt: null };
@@ -39,5 +40,5 @@ export function updateWarningCycles(account, config, now) {
 export function warningIsCurrent(account, warnings, config) {
   return Array.isArray(warnings) && warnings.some(w =>
     account.warningCycles?.[w.id]?.generation === w.generation &&
-    account.windows.some(current => current.id === w.id && current.used >= config.thresholds[account.provider].warn));
+    account.windows.some(current => current.id === w.id && current.used >= windowThreshold(config, account.provider, current.id).warn));
 }

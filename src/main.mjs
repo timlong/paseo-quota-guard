@@ -97,10 +97,18 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
           bridgeMode = snapshot.mode ?? null;
           if (bridgeMode !== config.mode) throw new Error('监控与执行层模式不一致');
           await serial(() => {
-            engine.ingest(snapshot.reports); engine.agents = snapshot.agents; engine.lastSnapshot = now(); lastError = null;
+            engine.ingest(snapshot.reports); engine.agents = snapshot.agents; engine.lastSnapshot = now();
+            if (lastError) store.audit('snapshot_restored', {}, now());
+            lastError = null;
             refreshed = true;
           });
-        } catch { lastError = bridgeMode !== null && bridgeMode !== config.mode ? '监控与执行层模式不一致，保护未就绪' : 'Paseo 不可连接或额度采集失败'; }
+        } catch (e) {
+          const error = bridgeMode !== null && bridgeMode !== config.mode ? '监控与执行层模式不一致，保护未就绪' : 'Paseo 不可连接或额度采集失败';
+          if (error !== lastError) store.audit('snapshot_failed', {
+            reason: /超时|timed? ?out/i.test(e?.message ?? '') ? 'timeout' : error.includes('模式') ? 'mode_mismatch' : 'bridge_unavailable',
+          }, now());
+          lastError = error;
+        }
       }
       await serial(async () => { engine.ingest([]); await stopAccounts(); await deliver(); });
     } finally { busy = false; }

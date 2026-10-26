@@ -7,6 +7,13 @@ import { PROVIDER_ICONS, QUOTA_MARK } from './provider-icons';
 
 type Colors = PluginScreenProps['theme']['colors'];
 type Threshold = { warn: number; pause: number };
+const thresholdFor = (data: Snapshot, provider: string, window: string): Threshold | undefined =>
+  data.thresholds[provider]?.windows?.[window as 'five_hour' | 'weekly'] ?? data.thresholds[provider];
+const THRESHOLD_ROWS = [
+  { key: 'claudeFiveHour', provider: 'claude', window: 'five_hour', label: 'Claude · 5 小时' },
+  { key: 'claudeWeekly', provider: 'claude', window: 'weekly', label: 'Claude · 周' },
+  { key: 'codex', provider: 'codex', window: 'weekly', label: 'Codex' },
+] as const;
 
 function formatReset(reset: string | null): string {
   const ms = reset ? Date.parse(reset) - Date.now() : NaN;
@@ -112,8 +119,8 @@ function ProviderIcon({ provider, size, color }: { provider: string; size: numbe
 
 /** One line: "✳ 8% 5h 35% wk  ⊛ 7% wk" — every window labelled, each number tinted by its threshold. */
 function UsageInline({ c, data }: { c: Colors; data: Snapshot }) {
-  const tone = (a: Account, used: number) => {
-    const t = data.thresholds[a.provider];
+  const tone = (a: Account, used: number, window: string) => {
+    const t = thresholdFor(data, a.provider, window);
     if (a.assessment.level === 'unknown') return c.foregroundMuted;
     if (!data.enabled || !t) return c.foreground;
     return used >= t.pause ? c.statusDanger : used >= t.warn ? c.statusWarning : c.foreground;
@@ -122,7 +129,7 @@ function UsageInline({ c, data }: { c: Colors; data: Snapshot }) {
     {data.accounts.map(a => <View key={a.id} style={[styles.row, { gap: 4 }]}>
       <ProviderIcon provider={a.provider} size={13} color={a.locked ? c.statusDanger : c.foregroundMuted} />
       <Text numberOfLines={1} style={{ fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-        {a.windows.length ? sortWindows(a).map((w, i) => <Text key={w.id} style={{ color: tone(a, w.used) }}>
+        {a.windows.length ? sortWindows(a).map((w, i) => <Text key={w.id} style={{ color: tone(a, w.used, w.id) }}>
           {i > 0 ? ' ' : ''}{w.used}%<Text style={{ color: c.foregroundMuted, fontWeight: '400', fontSize: 11 }}>{'\u2009'}{w.id === 'weekly' ? 'wk' : '5h'}</Text>
         </Text>) : <Text style={{ color: c.foregroundMuted }}>—</Text>}
       </Text>
@@ -137,7 +144,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
-  const [draft, setDraft] = useState({ claude: { warn: '80', pause: '90' }, codex: { warn: '90', pause: '95' } });
+  const [draft, setDraft] = useState({ claudeFiveHour: { warn: '80', pause: '90' }, claudeWeekly: { warn: '80', pause: '90' }, codex: { warn: '90', pause: '95' } });
   const [editingRevision, setEditingRevision] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [creditErrors, setCreditErrors] = useState<Record<string, string>>({});
@@ -150,22 +157,30 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
   }, [rpc]);
   useEffect(() => { void load(); const t = setInterval(() => void load(), 5000); return () => clearInterval(t); }, [load]);
   useEffect(() => {
-    if (data && editingRevision === null) setDraft({
-      claude: { warn: String(data.thresholds.claude.warn), pause: String(data.thresholds.claude.pause) },
-      codex: { warn: String(data.thresholds.codex.warn), pause: String(data.thresholds.codex.pause) },
-    });
+    if (data && editingRevision === null) {
+      const values = Object.fromEntries(THRESHOLD_ROWS.map(row => {
+        const t = thresholdFor(data, row.provider, row.window)!;
+        return [row.key, { warn: String(t.warn), pause: String(t.pause) }];
+      })) as typeof draft;
+      setDraft(values);
+    }
   }, [data, editingRevision]);
   async function save(options: { enabled?: boolean; notifications?: boolean; thresholds?: boolean } = {}) {
     if (!data) return;
     setBusy(true); setNotice(''); setError('');
     try {
-      const thresholds = options.thresholds ? Object.fromEntries(Object.entries(draft).map(([p, t]) => {
+      const parsed = options.thresholds ? Object.fromEntries(Object.entries(draft).map(([p, t]) => {
         if (!t.warn.trim() || !t.pause.trim()) throw new Error('请填写预警和暂停百分比');
         const warn = Number(t.warn), pause = Number(t.pause);
         if (!Number.isFinite(warn) || !Number.isFinite(pause) || warn < 0 || warn >= pause || pause > 100)
           throw new Error('阈值需满足：0 ≤ 预警 < 自动暂停 ≤ 100');
         return [p, { warn, pause }];
-      })) : data.thresholds;
+      })) : null;
+      const thresholds = parsed ? {
+        claude: { warn: data.thresholds.claude.warn, pause: data.thresholds.claude.pause,
+          windows: { five_hour: parsed.claudeFiveHour, weekly: parsed.claudeWeekly } },
+        codex: parsed.codex,
+      } : data.thresholds;
       await rpc({ action: 'settings', settings: {
         revision: options.thresholds ? editingRevision ?? data.settingsRevision : data.settingsRevision,
         enabled: options.enabled ?? data.enabled, notifications: options.notifications ?? data.notifications,
@@ -273,19 +288,20 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
           <SwitchRow c={c} label="手机额度通知" value={data.notifications} disabled={switchLocked} onChange={notifications => void save({ notifications })} />
           <ActionButton c={c} icon="Bell" label="测试手机通知" disabled={busy || !data.notifications} onPress={() => void act('test-push')} />
           <Divider c={c} />
-          {(['claude', 'codex'] as const).map(p => <View key={p} style={styles.between}>
-            <Text style={{ color: c.foreground, fontSize: 15 }}>{p === 'claude' ? 'Claude' : 'Codex'}</Text>
+          {THRESHOLD_ROWS.map(({ key: p, label }) => <View key={p} style={styles.between}>
+            <Text style={{ color: c.foreground, fontSize: 15 }}>{label}</Text>
             <View style={[styles.row, { gap: 12 }]}>
               {(['warn', 'pause'] as const).map(k => <View key={k} style={[styles.row, { gap: 6 }]}>
                 <Text style={{ color: c.foregroundMuted, fontSize: 13 }}>{k === 'warn' ? '预警' : '暂停'}</Text>
-                <TextInput accessibilityLabel={`${p} ${k === 'warn' ? '预警百分比' : '自动暂停百分比'}`} keyboardType="decimal-pad" editable={!busy}
+                <TextInput accessibilityLabel={`${label} ${k === 'warn' ? '预警百分比' : '自动暂停百分比'}`} keyboardType="decimal-pad" editable={!busy}
                   value={draft[p][k]} onChangeText={value => { setEditingRevision(r => r ?? data.settingsRevision); setDraft(d => ({ ...d, [p]: { ...d[p], [k]: value } })); }}
                   style={[styles.input, { color: c.foreground, backgroundColor: c.surface2, borderColor: c.border }]} />
                 <Text style={{ color: c.foregroundMuted, fontSize: 13 }}>%</Text>
               </View>)}
             </View>
           </View>)}
-          <Text style={[styles.note, { color: c.foregroundMuted }]}>0 ≤ 预警 &lt; 自动暂停 ≤ 100；各自应用到已监控的 5 小时／周窗口。降低暂停线可能立即中断任务。额度保护暂停需等待新读数满足恢复条件后自动解除；手动暂停保持不变。</Text>
+          <Text style={[styles.note, { color: c.foregroundMuted }]}>0 ≤ 预警 &lt; 自动暂停 ≤ 100。Claude 的 5 小时和周窗口分别判断，任一达到自己的暂停线即暂停；恢复需要两个窗口均低于各自恢复线。Codex 使用统一阈值，只判断实际返回的窗口。降低暂停线可能立即中断任务。</Text>
+          {data.collectionPolicy && <Text style={[styles.note, { color: c.foregroundMuted }]}>已有有效读数时，缓存有效期 {data.collectionPolicy.freshMs / 60000} 分钟；期间继续按轮询节奏获取额度，持续无新有效读数直至缓存到期即暂停，不额外延长。查询恢复且满足恢复条件后自动解除异常暂停；手动暂停保持不变。</Text>}
           {editingRevision !== null && editingRevision !== data.settingsRevision && <Text style={[styles.note, { color: c.statusWarning }]}>另一设备已修改设置，请取消编辑后重新调整。</Text>}
           <View style={[styles.row, { gap: 8 }]}>
             <ActionButton c={c} primary label="保存阈值" disabled={busy || editingRevision === null || editingRevision !== data.settingsRevision}
@@ -305,7 +321,6 @@ type CodexProps = { credits?: CodexCredits; error: string; onReset(creditId: str
 function AccountCard({ c, data, a, busy, onToggle, codex }: {
   c: Colors; data: Snapshot; a: Account; busy: boolean; onToggle(): void; codex?: CodexProps;
 }) {
-  const threshold: Threshold | undefined = data.thresholds[a.provider];
   const badge = accountBadge(data, a, c);
   const resumeHint = !data.enabled ? '额度保护已关闭' : !data.enforcementReady ? '执行层未就绪，请等待连接恢复' :
     !a.ready ? a.assessment.resumeReason ?? '额度尚未满足恢复条件，请刷新后重试' :
@@ -325,13 +340,17 @@ function AccountCard({ c, data, a, busy, onToggle, codex }: {
       a.stopDetails?.checkedCount === 0 ? '新请求已受限，本次未发现可中断的关联任务' : '本次已核验的关联任务已停止' :
       a.stopStatus === 'partial' ? '部分关联任务未停止或无法确认' : '正在确认关联任务的暂停结果'} />}
     {a.locked && <Text style={[styles.note, { color: a.ready ? c.foregroundMuted : c.statusWarning }]}>{resumeHint}</Text>}
-    {data.enabled && a.locked && a.pauseCause === 'quota' && <Text style={[styles.note, { color: c.foregroundMuted }]}>新读数确认所有受保护窗口满足恢复条件后，将自动解除暂停并通知；旧任务不会自动续跑。</Text>}
+    {data.enabled && a.locked && ['quota', 'unavailable'].includes(a.pauseCause ?? '') && <Text style={[styles.note, { color: c.foregroundMuted }]}>新读数确认所有受保护窗口满足恢复条件后，将自动解除暂停并通知；旧任务不会自动续跑。</Text>}
     {data.enabled && !a.locked && a.assessment.level === 'warning' && <Text style={[styles.note, { color: c.statusWarning }]}>额度预警，可随时手动暂停</Text>}
     {codex && <CodexCreditsInfo c={c} busy={busy} {...codex} />}
     {a.windows.map(w => <WindowRow key={w.id} c={c} label={w.id === 'weekly' ? '周' : '5 小时'} used={w.used} reset={w.reset}
-      threshold={data.enabled ? threshold : undefined} />)}
+      threshold={data.enabled ? thresholdFor(data, a.provider, w.id) : undefined} />)}
     {a.provider === 'codex' && a.windows.length === 1 && <Text style={[styles.note, { color: c.foregroundMuted }]}>仅保护当前返回的{a.windows[0].id === 'weekly' ? '周' : '5 小时'}额度；另一窗口未提供。</Text>}
-    <KeyValue c={c} label="阈值" value={threshold ? `预警 ${threshold.warn}% · 暂停 ${threshold.pause}%` : '未配置'} />
+    {(a.provider === 'claude' ? ['five_hour', 'weekly'] : ['weekly']).map(id => {
+      const t = thresholdFor(data, a.provider, id);
+      return <KeyValue key={id} c={c} label={a.provider === 'claude' ? `${id === 'weekly' ? '周' : '5 小时'}阈值` : '阈值'}
+        value={t ? `预警 ${t.warn}% · 暂停 ${t.pause}%` : '未配置'} />;
+    })}
     <KeyValue c={c} label="更新" value={formatAgo(a.fetchedAt)} />
     {!!a.error && <KeyValue c={c} label="采集异常" value={a.error} color={a.assessment.usingCachedReading ? c.statusWarning : c.statusDanger} />}
     {!!a.label && <Text numberOfLines={1} style={{ color: c.foregroundMuted, fontSize: 13 }}>{a.label}</Text>}
@@ -454,7 +473,7 @@ function ActionButton({ c, label, icon, primary, onPress, disabled }: {
   c: Colors; label: string; icon?: string; primary?: boolean; onPress(): void; disabled: boolean;
 }) {
   const fg = primary ? c.accentForeground : c.foreground;
-  return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, {
     backgroundColor: primary ? c.accent : 'transparent', borderColor: primary ? c.accent : c.border, opacity: disabled ? 0.4 : pressed ? 0.7 : 1,
   }]}>
     {icon && <Icon name={icon} size={14} color={fg} />}

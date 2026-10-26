@@ -57,11 +57,17 @@ for(const directoryArg of directories) {
  const bundles=await compilePlugin({client:directory+'/index.client.tsx',server:directory+'/index.server.ts'});
  const calls=[], opened=[];
  const snapshot={enabled:true,mode:'enforce',notifications:true,enforcementReady:true,settingsRevision:0,
-  thresholds:{claude:{warn:80,pause:90},codex:{warn:90,pause:95}},agents:[],accounts:[{
+  thresholds:{claude:{warn:80,pause:85,windows:{five_hour:{warn:75,pause:80},weekly:{warn:80,pause:90}}},codex:{warn:90,pause:95}},agents:[],accounts:[{
    id:'claude:test',provider:'claude',label:'test',locked:false,reason:'',stopStatus:null,error:null,ready:false,
    windows:[{id:'five_hour',used:35,reset:null},{id:'weekly',used:20,reset:null}],assessment:{level:'normal',canResume:true},
   }]};
- const client={invokePluginRpc:async(id,method,input)=>{assert.equal(id,'quota-guard');assert.equal(method,'quota.control');assert.equal(input.action,'status');calls.push(input.action);return snapshot;}};
+ let savedSettings;
+ const client={invokePluginRpc:async(id,method,input)=>{
+  assert.equal(id,'quota-guard');assert.equal(method,'quota.control');
+  assert.ok(['status','settings'].includes(input.action));calls.push(input.action);
+  if(input.action==='settings'){savedSettings=input.settings;snapshot.thresholds=input.settings.thresholds;snapshot.settingsRevision++;}
+  return {...snapshot};
+ }};
  const registry=new PluginRegistry({version,localeSource:{getLocale:()=> 'zh-CN',subscribe:()=>()=>{}},createRuntime:installation=>({i18n:installation.i18n,rpc:installation.invoke,openScreen:p=>opened.push(p),hosts:{}})});
  const warn=console.warn;
  try {
@@ -83,12 +89,26 @@ for(const directoryArg of directories) {
  assert.ok(calls.length>=2);const rendered=JSON.stringify(view.toJSON());assert.match(rendered,/Claude/);assert.match(rendered,/35/);
  const sidebarButton=view.root.findAllByType('Pressable').find(n=>String(n.props.accessibilityLabel).startsWith('额度保护'));
  assert.ok(sidebarButton);await act(async()=>sidebarButton.props.onPress());assert.equal(opened.at(-1).screenId,'dashboard');
+ const settingsButton=view.root.findAllByType('Pressable').find(n=>n.props.accessibilityLabel==='展开设置');
+ assert.ok(settingsButton);await act(async()=>settingsButton.props.onPress());
+ const inputs=view.root.findAllByType('TextInput');
+ const five=inputs.find(n=>n.props.accessibilityLabel==='Claude · 5 小时 自动暂停百分比');
+ const weekly=inputs.find(n=>n.props.accessibilityLabel==='Claude · 周 自动暂停百分比');
+ assert.ok(five && weekly);assert.equal(five.props.value,'80');assert.equal(weekly.props.value,'90');
+ await act(async()=>five.props.onChangeText('82'));
+ await act(async()=>weekly.props.onChangeText('95'));
+ const save=view.root.findAllByType('Pressable').find(n=>n.props.accessibilityLabel==='保存阈值');
+ assert.ok(save && !save.props.disabled);await act(async()=>save.props.onPress());
+ assert.equal(savedSettings.thresholds.claude.windows.five_hour.pause,82);
+ assert.equal(savedSettings.thresholds.claude.windows.weekly.pause,95);
+ assert.equal(savedSettings.thresholds.claude.windows.five_hour.warn,75);
+ assert.equal(savedSettings.thresholds.codex.pause,95);
  await act(async()=>view.unmount());registry.removeHost('test-host');assert.equal(registry.getSnapshot().length,0);
  registry.installCatalog('test-host',[{...fixed,clientBundle:bundles.clientBundle}],{client,audio:{play:()=>{}}});
  assert.equal(registry.getEvaluationError('test-host','quota-guard'),undefined);
  assert.equal(registry.getSnapshot().length,1,'重连后应重新安装入口');
  registry.removeHost('test-host');
- results.push({directory,sdk:version,loader:`v${version} registry.ts and evaluate.ts`,bundled:true,registered:true,renderedWithHostAdapter:true,statusRpc:true,sidebarNavigation:true,slashCommand:true,manifestReloadRestoresEntry:true,reconnect:true,cleanup:true});
+ results.push({directory,sdk:version,loader:`v${version} registry.ts and evaluate.ts`,bundled:true,registered:true,renderedWithHostAdapter:true,statusRpc:true,sidebarNavigation:true,slashCommand:true,independentWindowSettings:true,manifestReloadRestoresEntry:true,reconnect:true,cleanup:true});
 }
 const digest=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
 const report={version,modelsCalled:false,realMacDisplayConfirmed:false,
