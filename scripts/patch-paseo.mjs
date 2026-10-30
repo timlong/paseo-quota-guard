@@ -60,7 +60,6 @@ export function patchServer(root, bridgeUrl, expectedHashes = JSON.parse(readFil
         accounts.push(fallback());
       } else {
         if (identityKey) {
-          if (quotaGuardIdentity.size >= 64) quotaGuardIdentity.clear();
           quotaGuardIdentity.set(identityKey, { key: profile.key, ...(profile.label ? { label: profile.label } : {}) });
         }
         accounts.push({ ...profile, harness, input });
@@ -69,7 +68,8 @@ export function patchServer(root, bridgeUrl, expectedHashes = JSON.parse(readFil
       // Keep the login visible; fetching usage reports the vendor failure.
       accounts.push(fallback());
     }`],
-    ], 'const quotaGuardIdentity = new Map<string, { key: string; label?: string }>();\n'],
+    ], readFileSync(new URL('../src/claude-identity.mjs', import.meta.url), 'utf8').replace('export class ClaudeIdentityCache', 'class ClaudeIdentityCache') +
+      '\nconst quotaGuardIdentity = new ClaudeIdentityCache(process.env.PASEO_QUOTA_GUARD_HOME);\n'],
   ];
   const planned = edits.map(([name, replacements, prefix]) => {
     const path = join(root, name), before = readFileSync(path, 'utf8');

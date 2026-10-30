@@ -19,7 +19,7 @@ Paseo 插件 UI ──认证 RPC──→ 插件 server ──Unix socket──�
 
 核心采用 Node 24 ESM，减少发布构建和依赖数量；插件采用 TypeScript + React Native。与最初源码 fork 设想相比，首版直接对**已安装发布包的独立副本**应用可检查的补丁，并校验版本、原文件 SHA256 和唯一锚点。没有修改生产安装目录。升级到其他 Paseo 版本需要重新适配，不能直接套用补丁。
 
-补丁共四处：provider 包装入口、websocket 桥接、Codex 429 冷却，以及 Claude 额度源身份兜底。后者在 `discover()` 的凭据过期、profile 返回 status、profile 抛错三个兜底分支处，用「`hashAccountKey(JSON.stringify(input.route))` + 凭据秘密哈希」作为内存指纹（`Map`，达到 64 条时 clear）；`readProfile` 成功时记录指纹到真实 `{ key, label }`，兜底分支命中缓存则沿用真实账户身份，未命中才用原兜底哈希。秘密取 refreshToken 去空白（为空则取 accessToken 去空白），两者皆空则不读写缓存；指纹只存哈希与上游已公开的 key/label，绝不落盘或输出 token；凭据秘密变化会改变指纹，自动回退原兜底而不沿用旧账户。
+补丁共四处：provider 包装入口、websocket 桥接、Codex 429 冷却，以及 Claude 额度源身份兜底。后者在 `discover()` 的凭据过期、profile 返回 status、profile 抛错三个兜底分支处，用「`hashAccountKey(JSON.stringify(input.route))` + 凭据秘密哈希」作为身份指纹（最多 64 条，达到上限时清理）；`readProfile` 成功时记录指纹到真实 `{ key, label }`，兜底分支命中缓存则沿用真实账户身份，未命中才用原兜底哈希。秘密取 refreshToken 去空白（为空则取 accessToken 去空白），两者皆空则不读写缓存；指纹只存哈希与上游已公开的 key/label，以权限 0600 原子保存到 `claude-identities.json`，绝不保存或输出 token。重启后同一凭据指纹可以恢复已验证身份；凭据秘密变化会改变指纹，自动回退原兜底而不沿用旧账户。损坏/缺失缓存按无身份处理，写盘失败仍可使用本进程已验证的身份。不根据邮箱、单个旧账号或路由相同推断合并。
 
 ## 账户及窗口
 
@@ -41,7 +41,7 @@ Claude 必须两个窗口都有效；Codex 按用户确认只保护已返回的�
 | 达到暂停线 | 先写入 locked，再执行中断 |
 | 手动暂停 | 同一中断路径，原因单独记录 |
 | 自最后成功读取已满 10 分钟（`staleMs`）或从无有效读数 | 立即进入数据异常保护，不设额外宽限期 |
-| 账户超过 pruneMs 未被报告、从未有有效读数、且未锁定无暂停状态 | 隐藏（不删行、不进 status）；锁定账户保持可见，再次报告自动取消隐藏 |
+| 账户超过 pruneMs 未被报告、从未有有效读数、且未锁定无暂停状态 | 隐藏（不删行、不进 status）；锁定账户仍可查看，再次报告自动取消隐藏 |
 | 恢复条件成立 | 本次新读数有效且所有窗口满足恢复线时，自动解除额度或数据异常触发的 locked，发送一次 recovered；手动暂停保持锁定 |
 | 用户恢复 | 刷新并核验账户，验证余量后解除封锁；限流/超时可使用仍有效的缓存，不发送模型消息 |
 | 正常中断失败 | 保持封锁，报告 partial，后续循环继续核验 |
@@ -82,7 +82,9 @@ outbox 保存预警/暂停异常与完成/已自动恢复通知，失败指数�
 
 ## 文件和配置
 
-运行时：`settings.json`、`state.db`、`guard.sock`、`paseo.sock`、`push-ledger.json`。状态目录不进 Git；只保存必要账户信息，不复制登录文件。插件的 RPC 动作固定为 status/refresh/pause/resume/test-push/settings。
+运行时：`settings.json`、`state.db`、`guard.sock`、`paseo.sock`、`push-ledger.json`、`claude-identities.json`。状态目录不进 Git；只保存必要账户信息，不复制登录文件。插件的 RPC 动作固定为 status/refresh/pause/resume/test-push/settings。
+
+当前/历史展示不改变保护状态：完整快照中同服务商仍有其他账号，但某旧账号已至少 10 分钟未出现且无会话关联时，将旧条目标记为历史。空快照、心跳、短暂缺失或同服务商存在归属不明会话都不据此归档。尚未确认停止的账户仍显示在当前列表；已确认暂停的历史账户默认折叠，保留原锁、预警周期与通知去重状态，不补发历史通知。账号重新被发现或有会话关联时恢复显示，并继续按原保护状态判断；不会按 provider 或 label 强行去重。
 
 `config/default.json` 默认 observe、关闭真实通知，`pruneMs` 默认 21600000（6 小时，须为整数且大于 `staleMs`）。`config/paseo-0.11.2-hashes.json` 固定已验证的发布文件（含 Claude 与 Codex 两个 usage.ts）。staging 复制依赖、核心和插件，不依赖全局 npm 后续更新。
 

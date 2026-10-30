@@ -147,6 +147,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
   const [draft, setDraft] = useState({ claudeFiveHour: { warn: '80', pause: '90' }, claudeWeekly: { warn: '80', pause: '90' }, codex: { warn: '90', pause: '95' } });
   const [editingRevision, setEditingRevision] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [creditErrors, setCreditErrors] = useState<Record<string, string>>({});
   const creditsRequested = useRef(new Set<string>());
   const resetInFlight = useRef(false);
@@ -274,6 +275,24 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
         codex={a.provider === 'codex' ? { credits: data.codexCredits?.[a.id], error: creditErrors[a.id] ?? '',
           onReset: creditId => void resetCodex(a.id, creditId), onRefresh: () => void refreshCodex(a.id) } : undefined} />)}
       {data?.agents.some(a => a.protection === 'unmapped') && <Text style={[styles.note, { color: c.foregroundMuted }]}>部分会话无法确认账户归属，未计入已保护账户。</Text>}
+
+      {!!data?.historicalAccounts?.length && <Card c={c}>
+        <Pressable accessibilityRole="button" accessibilityLabel={historyOpen ? '收起历史账户' : '展开历史账户'}
+          accessibilityState={{ expanded: historyOpen }} onPress={() => setHistoryOpen(o => !o)}
+          style={[styles.between, { minHeight: 44 }]}>
+          <Text style={[styles.cardTitle, { color: c.foregroundMuted }]}>历史账户 · {data.historicalAccounts.length}</Text>
+          <Icon name={historyOpen ? 'ChevronUp' : 'ChevronDown'} size={18} color={c.foregroundMuted} />
+        </Pressable>
+        {historyOpen && <>
+          <Text style={[styles.note, { color: c.foregroundMuted }]}>这些账户当前未被识别，原暂停状态仍保留。再次识别后会回到当前账户列表；不会自动与其他账号合并。</Text>
+          {data.historicalAccounts.map(a => <View key={a.id} style={{ gap: 8 }}>
+            <Divider c={c} />
+            <Text selectable style={{ color: c.foreground }}>{a.provider === 'claude' ? 'Claude' : 'Codex'} · {a.label || '身份未确认'}</Text>
+            <KeyValue c={c} label="保留状态" value={a.locked ? `已暂停 · ${a.reason}` : '未暂停'} />
+            <KeyValue c={c} label="最后识别" value={a.lastSeenAt ? gmt8(a.lastSeenAt) + '（GMT+8）' : '未知'} />
+          </View>)}
+        </>}
+      </Card>}
 
       {data && <Card c={c}>
         <Pressable accessibilityRole="button" accessibilityLabel={settingsExpanded ? '收起设置' : '展开设置'} onPress={toggleSettings} style={styles.between}>

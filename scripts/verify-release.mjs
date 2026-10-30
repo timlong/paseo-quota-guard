@@ -41,6 +41,7 @@ try {
   assert.equal(usage.windows[0].id, 'five_hour'); assert.equal(calls, 2);
 
   // Claude 身份兜底补丁：profile 抖动不再生成无数据影子账户。
+  process.env.PASEO_QUOTA_GUARD_HOME = testHome;
   await build({ entryPoints: [join(server, 'dist/server/builtin-plugins/claude-usage-source/server/usage.ts')],
     bundle: true, platform: 'node', format: 'esm', packages: 'external', tsconfigRaw: {}, outfile: join(testHome, 'claude-usage.mjs') });
   const { discover } = await import(pathToFileURL(join(testHome, 'claude-usage.mjs')).href);
@@ -65,6 +66,11 @@ try {
   claudeProfileMode = 'success';
   const [claudeOk] = await discover(claudeScope, claudeLookup, claudeFetch);
   assert.equal(claudeOk.key, 'acc-uuid.org-uuid'); assert.equal(claudeOk.label, 'person@example.com');
+  // 模块重新加载（包括 daemon 重启）后，过期的同一凭据仍映射到已验证身份。
+  const restartedClaude = await import(pathToFileURL(join(testHome, 'claude-usage.mjs')).href + '?restart');
+  writeClaudeCreds('at-restarted', 'rt-shared', 2000000000 - 1);
+  const [afterRestart] = await restartedClaude.discover(claudeScope, claudeLookup, async () => { throw Error('must not fetch expired credentials'); });
+  assert.equal(afterRestart.key, claudeOk.key); assert.equal(afterRestart.label, claudeOk.label);
   // 2) 同一凭据（refreshToken 不变）下 profile 抛错仍得真实 key/label。
   writeClaudeCreds('at-2', 'rt-shared', undefined);
   claudeProfileMode = 'throw';

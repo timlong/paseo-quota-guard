@@ -66,7 +66,7 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
     for (const job of store.pending(now())) {
       const payload = JSON.parse(job.body); const a = engine.accounts.get(payload.accountId);
       const assessment = a && assess(a, config, now());
-      if (!a || (payload.kind === 'warning' && (a.locked || assessment.level !== 'warning' ||
+      if (!a || engine.isHistorical(a) || (payload.kind === 'warning' && (a.locked || assessment.level !== 'warning' ||
           (a.error && !assessment.usingCachedReading) || !warningIsCurrent(a, payload.warnings, config))) ||
           ['stopping', 'ready'].includes(payload.kind) ||
           (payload.kind === 'partial' && (!a.locked || a.stopStatus !== 'partial')) ||
@@ -97,7 +97,7 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
           bridgeMode = snapshot.mode ?? null;
           if (bridgeMode !== config.mode) throw new Error('监控与执行层模式不一致');
           await serial(() => {
-            engine.ingest(snapshot.reports); engine.agents = snapshot.agents; engine.lastSnapshot = now();
+            engine.ingest(snapshot.reports, { agents: snapshot.agents }); engine.lastSnapshot = now();
             if (lastError) store.audit('snapshot_restored', {}, now());
             lastError = null;
             refreshed = true;

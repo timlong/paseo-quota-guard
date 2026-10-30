@@ -58,7 +58,7 @@ export class Engine {
       ...extra,
     }, this.now());
   }
-  ingest(entries) {
+  ingest(entries, { agents } = {}) {
     const now = this.now();
     this.store.transaction(() => {
       const refreshed = new Set();
@@ -76,6 +76,19 @@ export class Engine {
           refreshed.add(a.id);
         }
         a.error = r.error; a.errorCode = r.errorCode; this.accounts.set(a.id, a);
+      }
+      if (Array.isArray(agents)) {
+        this.agents = agents;
+        const seen = new Set(entries.filter(r => this.accounts.has(r.id)).map(r => r.id));
+        const providers = new Set([...seen].map(id => this.accounts.get(id).provider));
+        const linked = new Set(agents.flatMap(a => a.reportIds ?? []));
+        for (const a of this.accounts.values()) {
+          const uncertain = agents.some(g => g.provider === a.provider && !g.reportIds?.length);
+          if (seen.has(a.id) || linked.has(a.id) || uncertain) delete a.historicalAt;
+          else if (providers.has(a.provider) && now - a.lastSeenAt >= this.config.staleMs)
+            a.historicalAt ??= now;
+          // Empty/failed discovery is not evidence of removal. Heartbeats never change membership.
+        }
       }
       for (const a of this.accounts.values()) this.evaluate(a, now, refreshed.has(a.id));
     });
@@ -157,6 +170,10 @@ export class Engine {
       (a.stopStatus === null || a.stopStatus === undefined) &&
       now - a.lastSeenAt > this.config.pruneMs;
   }
+  isHistorical(a) {
+    // Unconfirmed interruption stays in the current list even if discovery has moved on.
+    return a.historicalAt != null && (!a.locked || a.stopStatus === 'paused') && a.stopStatus !== 'partial';
+  }
   // 设置变更/启动协调对账户状态的统一重置：必须在 store.transaction 内调用。
   resetAccountsForSettings(enabled, previous) {
     for (const a of this.accounts.values()) {
@@ -213,15 +230,17 @@ export class Engine {
   }
   status() {
     const now = this.now();
+    const rows = [...this.accounts.values()].filter(a => !this.isHidden(a, now)).map(a => {
+      const assessment = assess(a, this.config, now);
+      return { ...a, ready: a.locked && assessment.canResume, assessment };
+    });
     return {
       mode: this.config.mode, notifications: this.config.notifications, updatedAt: now, lastSnapshot: this.lastSnapshot,
       enabled: this.config.enabled !== false, settingsRevision: this.config.settingsRevision ?? 0,
       thresholds: this.config.thresholds,
       collectionPolicy: { freshMs: this.config.staleMs },
-      accounts: [...this.accounts.values()].filter(a => !this.isHidden(a, now)).map(a => {
-        const assessment = assess(a, this.config, now);
-        return { ...a, ready: a.locked && assessment.canResume, assessment };
-      }),
+      accounts: rows.filter(a => !this.isHistorical(a)),
+      historicalAccounts: rows.filter(a => this.isHistorical(a)),
       agents: this.agents, events: this.store.events(),
     };
   }

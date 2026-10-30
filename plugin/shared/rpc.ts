@@ -19,6 +19,7 @@ export interface Account {
   reason: string; stopStatus: string | null; error: string | null; ready: boolean;
   pauseCause?: 'quota' | 'manual' | 'unavailable' | null;
   errorCode?: 'rate_limited' | 'timeout' | 'unavailable' | 'invalid_data' | 'read_failed' | null;
+  historicalAt?: number; lastSeenAt?: number;
   stopDetails?: { checkedCount?: number } | null;
   windows: { id: string; used: number; reset: string | null }[];
   assessment: { level: string; canResume: boolean; reason: string; resumeReason?: string | null; usingCachedReading?: boolean };
@@ -32,6 +33,7 @@ export interface Snapshot {
   enabled: boolean; settingsRevision: number;
   mode: string; notifications: boolean; lastError?: string | null; enforcementReady?: boolean;
   accounts: Account[]; thresholds: Record<string, { warn: number; pause: number; windows?: Record<'five_hour' | 'weekly', { warn: number; pause: number }> }>;
+  historicalAccounts?: Account[];
   agents: { id: string; protection: string }[];
   collectionPolicy?: { freshMs: number };
   codexCredits?: Record<string, CodexCredits>;
