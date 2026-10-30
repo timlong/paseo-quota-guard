@@ -65,13 +65,17 @@ test('同名两个真实账户都仍在采集时不合并；不同服务商不�
   assert.equal(f.engine.status().historicalAccounts.length, 0);
 });
 
-test('完整服务快照将旧锁定记录收进历史；重启和采集失败不清锁、不补发旧通知', async t => {
+test('未识别占位记录不能替代已验证账号；重启和采集失败不清锁、不重复通知', async t => {
   const home = mkdtempSync(join(tmpdir(), 'qgh-')); t.after(() => rmSync(home, { recursive: true, force: true }));
   let now = Date.now(), fail = false; const cfg = config({ notifications: true });
   const seed = new Store(join(home, 'state.db'));
   const old = new Engine(cfg, seed, () => now);
   old.ingest([report('claude', 10, 10, now, 'old')]); old.pause('claude:old');
-  old.stopResult('claude:old', { complete: true, pending: [], checkedCount: 0 }); seed.close();
+  old.stopResult('claude:old', { complete: true, pending: [], checkedCount: 0 });
+  old.require('claude:old').historicalAt = now;
+  seed.save(old.require('claude:old'));
+  for (const row of seed.pending(now)) seed.complete(row.key);
+  seed.close();
   now += cfg.staleMs;
   const received = [];
   const bridge = await serve(join(home, 'paseo.sock'), async (path, body) => {
@@ -86,16 +90,36 @@ test('完整服务快照将旧锁定记录收进历史；重启和采集失败�
   t.after(() => service.close());
   const rpc = (p, b) => call(join(home, 'guard.sock'), p, b);
   let s = await rpc('/status');
-  assert.deepEqual(s.accounts.map(a => a.id), ['claude:fallback']);
-  assert.deepEqual(s.historicalAccounts.map(a => a.id), ['claude:old']);
-  assert.equal(s.historicalAccounts[0].pauseCause, 'manual');
-  assert.equal(s.historicalAccounts[0].locked, true);
+  assert.deepEqual(s.accounts.map(a => a.id), ['claude:old']);
+  assert.deepEqual(s.unidentifiedAccounts.map(a => a.id), ['claude:fallback']);
+  assert.equal(s.historicalAccounts.length, 0);
+  assert.equal(s.accounts[0].pauseCause, 'manual');
+  assert.equal(s.accounts[0].locked, true);
+  assert.equal(s.accounts[0].assessment.level, 'unknown');
+  assert.equal(s.unidentifiedAccounts[0].fetchedAt, null);
+  assert.equal(s.unidentifiedAccounts[0].windows.length, 0);
   assert.equal((await rpc('/admit', { reportIds: ['claude:old'] })).allowed, false);
   assert.equal(received.filter(p => p.accountId === 'claude:old').length, 0);
   await service.close(); fail = true;
   service = await startService({ home, config: cfg, bridgePath: join(home, 'paseo.sock'), now: () => now });
   s = await rpc('/status');
-  assert.equal(s.historicalAccounts[0].locked, true);
+  assert.equal(s.unidentifiedAccounts[0].locked, true);
   assert.equal(s.accounts[0].locked, true);
-  assert.equal(received.length, 1, '不补发历史暂停或重复通知');
+  assert.equal(received.length, 0, '不重复通知同一次暂停或以占位记录另发通知');
+});
+
+test('只有未识别记录时保留主卡；关联会话或暂停未完成时不能折叠异常', t => {
+  const f = fixture(t);
+  const failed = { ...report('claude', 0, 0, Date.now(), 'fallback'), report: { status: 'unavailable' } };
+  f.engine.ingest([failed], { agents: [] });
+  f.engine.stopResult('claude:fallback', { complete: true, pending: [], checkedCount: 0 });
+  assert.equal(f.engine.status().accounts.length, 1);
+  assert.equal(f.engine.status().unidentifiedAccounts.length, 0);
+  f.snapshot(['verified']);
+  assert.equal(f.engine.status().unidentifiedAccounts.length, 1);
+  f.engine.ingest([failed], { agents: [{ provider: 'claude', reportIds: ['claude:fallback'] }] });
+  assert.equal(f.engine.status().unidentifiedAccounts.length, 0);
+  f.engine.agents = [];
+  f.engine.stopResult('claude:fallback', { complete: false, pending: ['task'] });
+  assert.equal(f.engine.status().unidentifiedAccounts.length, 0);
 });

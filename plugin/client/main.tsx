@@ -129,7 +129,7 @@ function UsageInline({ c, data }: { c: Colors; data: Snapshot }) {
     {data.accounts.map(a => <View key={a.id} style={[styles.row, { gap: 4 }]}>
       <ProviderIcon provider={a.provider} size={13} color={a.locked ? c.statusDanger : c.foregroundMuted} />
       <Text numberOfLines={1} style={{ fontSize: 13, fontWeight: '600', fontVariant: ['tabular-nums'] }}>
-        {a.windows.length ? sortWindows(a).map((w, i) => <Text key={w.id} style={{ color: tone(a, w.used, w.id) }}>
+        {a.assessment.level === 'unknown' ? <Text style={{ color: c.foregroundMuted }}>额度未知</Text> : a.windows.length ? sortWindows(a).map((w, i) => <Text key={w.id} style={{ color: tone(a, w.used, w.id) }}>
           {i > 0 ? ' ' : ''}{w.used}%<Text style={{ color: c.foregroundMuted, fontWeight: '400', fontSize: 11 }}>{'\u2009'}{w.id === 'weekly' ? 'wk' : '5h'}</Text>
         </Text>) : <Text style={{ color: c.foregroundMuted }}>—</Text>}
       </Text>
@@ -148,6 +148,7 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
   const [editingRevision, setEditingRevision] = useState<number | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [unidentifiedOpen, setUnidentifiedOpen] = useState(false);
   const [creditErrors, setCreditErrors] = useState<Record<string, string>>({});
   const creditsRequested = useRef(new Set<string>());
   const resetInFlight = useRef(false);
@@ -276,6 +277,21 @@ export function Dashboard({ theme, layout }: PluginScreenProps) {
           onReset: creditId => void resetCodex(a.id, creditId), onRefresh: () => void refreshCodex(a.id) } : undefined} />)}
       {data?.agents.some(a => a.protection === 'unmapped') && <Text style={[styles.note, { color: c.foregroundMuted }]}>部分会话无法确认账户归属，未计入已保护账户。</Text>}
 
+      {!!data?.unidentifiedAccounts?.length && <Card c={c}>
+        <Pressable accessibilityRole="button" accessibilityLabel={unidentifiedOpen ? '收起身份待确认记录' : '展开身份待确认记录'}
+          accessibilityState={{ expanded: unidentifiedOpen }} onPress={() => setUnidentifiedOpen(o => !o)}
+          style={[styles.between, { minHeight: 44 }]}>
+          <Text style={[styles.cardTitle, { color: c.statusWarning }]}>身份待确认 · {data.unidentifiedAccounts.length}</Text>
+          <Icon name={unidentifiedOpen ? 'ChevronUp' : 'ChevronDown'} size={18} color={c.foregroundMuted} />
+        </Pressable>
+        <Text style={[styles.note, { color: c.foregroundMuted }]}>Claude 登录身份暂时无法确认。上方保留此前已验证的账号，未将这些记录视为新账号或与原账号合并。</Text>
+        {unidentifiedOpen && data.unidentifiedAccounts.map(a => <View key={a.id} style={{ gap: 8 }}>
+          <Divider c={c} />
+          <KeyValue c={c} label="采集异常" value={a.error || '身份未确认，尚无有效额度'} />
+          <KeyValue c={c} label="保护状态" value={a.locked ? '保持暂停' : '保护未触发'} />
+        </View>)}
+      </Card>}
+
       {!!data?.historicalAccounts?.length && <Card c={c}>
         <Pressable accessibilityRole="button" accessibilityLabel={historyOpen ? '收起历史账户' : '展开历史账户'}
           accessibilityState={{ expanded: historyOpen }} onPress={() => setHistoryOpen(o => !o)}
@@ -341,6 +357,7 @@ function AccountCard({ c, data, a, busy, onToggle, codex }: {
   c: Colors; data: Snapshot; a: Account; busy: boolean; onToggle(): void; codex?: CodexProps;
 }) {
   const badge = accountBadge(data, a, c);
+  const stale = a.fetchedAt != null && a.assessment.level === 'unknown';
   const resumeHint = !data.enabled ? '额度保护已关闭' : !data.enforcementReady ? '执行层未就绪，请等待连接恢复' :
     !a.ready ? a.assessment.resumeReason ?? '额度尚未满足恢复条件，请刷新后重试' :
     a.assessment.usingCachedReading ? '上次有效读数仍在有效期内，可手动恢复；继续保护额度。' : '可手动恢复，之后进入原会话继续。';
@@ -362,7 +379,8 @@ function AccountCard({ c, data, a, busy, onToggle, codex }: {
     {data.enabled && a.locked && ['quota', 'unavailable'].includes(a.pauseCause ?? '') && <Text style={[styles.note, { color: c.foregroundMuted }]}>新读数确认所有受保护窗口满足恢复条件后，将自动解除暂停并通知；旧任务不会自动续跑。</Text>}
     {data.enabled && !a.locked && a.assessment.level === 'warning' && <Text style={[styles.note, { color: c.statusWarning }]}>额度预警，可随时手动暂停</Text>}
     {codex && <CodexCreditsInfo c={c} busy={busy} {...codex} />}
-    {a.windows.map(w => <WindowRow key={w.id} c={c} label={w.id === 'weekly' ? '周' : '5 小时'} used={w.used} reset={w.reset}
+    {stale && <Text style={[styles.note, { color: c.statusWarning }]}>上次有效额度已过期，当前额度不可用。下方仅为历史读数，不能据此恢复任务。</Text>}
+    {a.windows.map(w => <WindowRow key={w.id} c={c} label={(w.id === 'weekly' ? '周' : '5 小时') + (stale ? '（历史读数）' : '')} used={w.used} reset={stale ? null : w.reset}
       threshold={data.enabled ? thresholdFor(data, a.provider, w.id) : undefined} />)}
     {a.provider === 'codex' && a.windows.length === 1 && <Text style={[styles.note, { color: c.foregroundMuted }]}>仅保护当前返回的{a.windows[0].id === 'weekly' ? '周' : '5 小时'}额度；另一窗口未提供。</Text>}
     {(a.provider === 'claude' ? ['five_hour', 'weekly'] : ['weekly']).map(id => {

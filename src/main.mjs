@@ -66,7 +66,7 @@ export async function startService({ home, config, bridgePath, now = Date.now, c
     for (const job of store.pending(now())) {
       const payload = JSON.parse(job.body); const a = engine.accounts.get(payload.accountId);
       const assessment = a && assess(a, config, now());
-      if (!a || engine.isHistorical(a) || (payload.kind === 'warning' && (a.locked || assessment.level !== 'warning' ||
+      if (!a || engine.isHistorical(a) || engine.isUnidentified(a) || (payload.kind === 'warning' && (a.locked || assessment.level !== 'warning' ||
           (a.error && !assessment.usingCachedReading) || !warningIsCurrent(a, payload.warnings, config))) ||
           ['stopping', 'ready'].includes(payload.kind) ||
           (payload.kind === 'partial' && (!a.locked || a.stopStatus !== 'partial')) ||

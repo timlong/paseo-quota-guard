@@ -188,3 +188,9 @@ node scripts/verify-plugin-compat.mjs /tmp/paseo-plugin-compat-013 0.13.0 \
 候选 `.local/release-account-history-20261030` 已包含 guard、插件和四处补丁的完整 server 副本。验证覆盖独立进程身份缓存读取、真实 Claude discover 模块重新加载、换凭据不串号、缓存损坏、旧锁保留、采集失败/重启不重复通知，以及 Paseo 0.14 加载器中的历史折叠交互。均未调用真实模型；测试渲染不等同于 Mac 实机显示。
 
 运行中的 guard 与界面可先更新；当前有运行中/停止状态未确认的会话，daemon 不重启。核验完整候选后将 daemon 单元的下一次启动路径指向候选版本，身份缓存修复随下一次正常重启加载。报告 `.local/reports/account-history-deployment.json` 区分即时生效部分和下一次启动部分；回退需恢复备份的两个单元及原插件目录。持久设置仍以生产文件为准，不覆盖用户调整后的阈值。
+
+## 2026-10-30 已验证账户显示优先级修正
+
+用户指出带邮箱的 Claude 才是此前成功读取额度的真实记录。此前按最近发现时间展示的规则错误地让身份未知的占位条目取代了已验证账号。修正为：只有未识别条目出现时保留/恢复已验证账号主卡；未关联会话且暂停已确认的占位条目收入“身份待确认”，不合并身份、不给它复制旧额度、不解除保护。两条记录的暂停状态均保留；主卡旧额度标为历史读数，侧栏显示额度未知。
+
+本次 guard/插件候选为 `.local/release-verified-account-20261030`，更新无需重启 daemon。保留此前已安排的下一次 daemon 启动路径及身份持久化修复。报告 `.local/reports/verified-account-deployment.json`；线上核验要求主列表的 Claude ID/邮箱与此前已验证记录一致，而不是仅检查条目数量。

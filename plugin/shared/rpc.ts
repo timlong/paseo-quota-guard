@@ -34,6 +34,7 @@ export interface Snapshot {
   mode: string; notifications: boolean; lastError?: string | null; enforcementReady?: boolean;
   accounts: Account[]; thresholds: Record<string, { warn: number; pause: number; windows?: Record<'five_hour' | 'weekly', { warn: number; pause: number }> }>;
   historicalAccounts?: Account[];
+  unidentifiedAccounts?: Account[];
   agents: { id: string; protection: string }[];
   collectionPolicy?: { freshMs: number };
   codexCredits?: Record<string, CodexCredits>;

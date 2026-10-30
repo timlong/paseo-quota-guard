@@ -61,11 +61,13 @@ for(const directoryArg of directories) {
  const calls=[], opened=[];
  const snapshot={enabled:true,mode:'enforce',notifications:true,enforcementReady:true,settingsRevision:0,
   thresholds:{claude:{warn:80,pause:85,windows:{five_hour:{warn:75,pause:80},weekly:{warn:80,pause:90}}},codex:{warn:90,pause:95}},agents:[],accounts:[{
-   id:'claude:test',provider:'claude',label:'test',locked:false,reason:'',stopStatus:null,error:null,ready:false,
-   windows:[{id:'five_hour',used:35,reset:null},{id:'weekly',used:20,reset:null}],assessment:{level:'normal',canResume:true},
+   id:'claude:test',provider:'claude',label:'verified@example.test',locked:true,reason:'额度数据缺失或过期',stopStatus:'paused',error:'登录失效或额度不可用',ready:false,
+   fetchedAt:Date.now()-86400000,
+   windows:[{id:'five_hour',used:35,reset:null},{id:'weekly',used:20,reset:null}],assessment:{level:'unknown',canResume:false},
   }]};
  snapshot.historicalAccounts = [{...snapshot.accounts[0], id:'claude:previous', label:'历史测试账户',
    locked:true, reason:'用户手动暂停', pauseCause:'manual', stopStatus:'paused', lastSeenAt:Date.now()-86400000}];
+ snapshot.unidentifiedAccounts = [{...snapshot.accounts[0],id:'claude:fallback',label:'Claude',fetchedAt:null,windows:[],error:'身份读取测试失败'}];
  let savedSettings;
  const client={invokePluginRpc:async(id,method,input)=>{
   assert.equal(id,'quota-guard');assert.equal(method,'quota.control');
@@ -92,6 +94,12 @@ for(const directoryArg of directories) {
  await act(async()=>{view=TestRenderer.create(React.createElement(PluginRpcProvider,{invoke:p.invoke},
   React.createElement(React.Fragment,null,React.createElement(p.sidebarItems.footer[0].Component,props),React.createElement(p.surfaces[0].Component,props))));});
  assert.ok(calls.length>=2);const rendered=JSON.stringify(view.toJSON());assert.match(rendered,/Claude/);assert.match(rendered,/35/);
+ assert.match(rendered,/verified@example.test/);assert.match(rendered,/上次有效额度已过期/);assert.match(rendered,/额度未知/);
+ assert.ok(!rendered.includes('身份读取测试失败'));
+ const unidentifiedButton=view.root.findAllByType('Pressable').find(n=>n.props.accessibilityLabel==='展开身份待确认记录');
+ assert.ok(unidentifiedButton);await act(async()=>unidentifiedButton.props.onPress());
+ assert.match(JSON.stringify(view.toJSON()),/身份读取测试失败/);
+ await act(async()=>view.root.findAllByType('Pressable').find(n=>n.props.accessibilityLabel==='收起身份待确认记录').props.onPress());
  assert.ok(!rendered.includes('历史测试账户'), '历史记录默认折叠');
  const historyButton=view.root.findAllByType('Pressable').find(n=>n.props.accessibilityLabel==='展开历史账户');
  assert.ok(historyButton);await act(async()=>historyButton.props.onPress());
@@ -121,7 +129,7 @@ for(const directoryArg of directories) {
  assert.equal(registry.getEvaluationError('test-host','quota-guard'),undefined);
  assert.equal(registry.getSnapshot().length,1,'重连后应重新安装入口');
  registry.removeHost('test-host');
- results.push({directory,sdk:version,loader:`v${version} registry.ts and evaluate.ts`,bundled:true,registered:true,renderedWithHostAdapter:true,statusRpc:true,sidebarNavigation:true,slashCommand:true,independentWindowSettings:true,historicalAccountsDisclosure:true,manifestReloadRestoresEntry:true,reconnect:true,cleanup:true});
+ results.push({directory,sdk:version,loader:`v${version} registry.ts and evaluate.ts`,bundled:true,registered:true,renderedWithHostAdapter:true,statusRpc:true,sidebarNavigation:true,slashCommand:true,independentWindowSettings:true,historicalAccountsDisclosure:true,verifiedAccountAndStaleReading:true,manifestReloadRestoresEntry:true,reconnect:true,cleanup:true});
 }
 const digest=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
 const report={version,modelsCalled:false,realMacDisplayConfirmed:false,

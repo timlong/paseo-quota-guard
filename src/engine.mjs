@@ -79,12 +79,16 @@ export class Engine {
       }
       if (Array.isArray(agents)) {
         this.agents = agents;
-        const seen = new Set(entries.filter(r => this.accounts.has(r.id)).map(r => r.id));
+        const seen = new Set(entries.filter(r => r && this.accounts.has(r.id)).map(r => r.id));
         const providers = new Set([...seen].map(id => this.accounts.get(id).provider));
+        const verifiedProviders = new Set([...seen].filter(id => this.accounts.get(id).fetchedAt != null)
+          .map(id => this.accounts.get(id).provider));
         const linked = new Set(agents.flatMap(a => a.reportIds ?? []));
         for (const a of this.accounts.values()) {
           const uncertain = agents.some(g => g.provider === a.provider && !g.reportIds?.length);
-          if (seen.has(a.id) || linked.has(a.id) || uncertain) delete a.historicalAt;
+          const unidentifiedReplacement = a.provider === 'claude' && a.fetchedAt != null &&
+            providers.has(a.provider) && !verifiedProviders.has(a.provider);
+          if (seen.has(a.id) || linked.has(a.id) || uncertain || unidentifiedReplacement) delete a.historicalAt;
           else if (providers.has(a.provider) && now - a.lastSeenAt >= this.config.staleMs)
             a.historicalAt ??= now;
           // Empty/failed discovery is not evidence of removal. Heartbeats never change membership.
@@ -174,6 +178,13 @@ export class Engine {
     // Unconfirmed interruption stays in the current list even if discovery has moved on.
     return a.historicalAt != null && (!a.locked || a.stopStatus === 'paused') && a.stopStatus !== 'partial';
   }
+  isUnidentified(a) {
+    // Presentation only: do not alias identities, transfer readings, or release either lock.
+    return a.provider === 'claude' && a.fetchedAt == null && a.windows.length === 0 &&
+      !this.isHistorical(a) && (!a.locked || a.stopStatus === 'paused') && a.stopStatus !== 'partial' &&
+      !this.agents.some(g => g.reportIds?.includes(a.id) || g.provider === a.provider && !g.reportIds?.length) &&
+      [...this.accounts.values()].some(other => other.provider === a.provider && other.fetchedAt != null && !this.isHistorical(other));
+  }
   // 设置变更/启动协调对账户状态的统一重置：必须在 store.transaction 内调用。
   resetAccountsForSettings(enabled, previous) {
     for (const a of this.accounts.values()) {
@@ -239,8 +250,9 @@ export class Engine {
       enabled: this.config.enabled !== false, settingsRevision: this.config.settingsRevision ?? 0,
       thresholds: this.config.thresholds,
       collectionPolicy: { freshMs: this.config.staleMs },
-      accounts: rows.filter(a => !this.isHistorical(a)),
+      accounts: rows.filter(a => !this.isHistorical(a) && !this.isUnidentified(a)),
       historicalAccounts: rows.filter(a => this.isHistorical(a)),
+      unidentifiedAccounts: rows.filter(a => this.isUnidentified(a)),
       agents: this.agents, events: this.store.events(),
     };
   }
