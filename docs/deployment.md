@@ -170,3 +170,11 @@ node scripts/verify-plugin-compat.mjs /tmp/paseo-plugin-compat-013 0.13.0 \
 候选目录为 `.local/release-window-thresholds-20261026`。隔离验证覆盖 缓存到期前读取失败不暂停、恰满 10 分钟失败暂停、新读数自动恢复、重启与通知去重、分窗口设置持久化，以及官方 0.13.0 加载器上的界面独立编辑。测试使用模拟采集/中断/推送，不调用模型。验证报告：`.local/reports/window-threshold-verification.json`、`window-threshold-plugin-compat.json`。
 
 部署使用 guard 与插件热更新流程，先校验候选 bridge 与**正在运行的 daemon release** 相同（不能用旧插件目录推断 daemon 版本），备份后仅重启 guard、替换插件目录。生产结果写入 `.local/reports/window-threshold-deployment.json`；daemon 无需重启，Mac 实际显示仍需客户端确认。
+
+## 2026-10-30 Mac 0.14.0 插件兼容修复
+
+用户确认 Mac 已升级到 0.14.0。生产插件仍为 running，保护 ready；入口隐藏的原因是 manifest 的 `>=0.11.2 <0.14.0` 不接受新客户端。此前修复只覆盖至 0.13.x，并没有建立未来版本的自动兼容保证。该上限限制客户端加载，与插件是否已安装、后台保护是否运行是两件事。
+
+在隔离目录安装官方 0.14.0 SDK/protocol，并获取 v0.14.0 的实际 registry/evaluate/icons 源码；三份源码哈希与 0.13.0 一致。使用真实 SDK 和加载器、模拟 UI/传输适配，验证当前生产插件副本与仓库插件：旧版本范围拒绝、新范围加载、侧栏/页面、status RPC、分窗口设置、导航、`/quota`、清理和重连均通过；未调用模型或真实推送。验证脚本将旧范围与下一未支持版本边界改为依据目标版本计算，避免检查程序固定在 0.13/0.14。
+
+源码与生产 manifest 更新为 `>=0.11.2 <0.15.0`。持有部署锁并备份后 reload 插件，确认仅 manifest 变化，客户端 bundle、daemon/guard PID、daemon 配置、阈值、开关与设置 revision 均不变。报告在 `.local/reports/plugin-compat-014/result.json`、`deployment.json`。Mac 实际屏幕未验证；重新连接可重新获取 catalog。0.15 及以后仍需独立兼容验证，不通过删除上限宣称支持未知 SDK。

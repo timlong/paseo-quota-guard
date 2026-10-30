@@ -46,14 +46,17 @@ const {PluginRegistry}=loadTs(root+'registry.ts',{
  '@getpaseo/protocol/plugin-requirements':compatibility,'@/utils/app-version':{resolveAppVersion:()=> version},
  './client-runtime':{createPluginClientRuntime:()=>({})},'./evaluate':evaluator,
 });
-const old={id:'quota-guard',requirements:{paseo:'>=0.11.2 <0.13.0'}};
+assert.match(version, /^\d+\.\d+\.\d+$/, '使用正式客户端版本验证');
+const [major, minor] = version.split('.').map(Number);
+const nextMinor = `${major}.${minor + 1}.0`;
+const old={id:'quota-guard',requirements:{paseo:`>=0.11.2 <${version}`}};
 assert.throws(()=>compatibility.assertPluginCompatibility({...old,version,runtime:'app'}),/requires Paseo/);
 const results=[];
 for(const directoryArg of directories) {
  const directory=resolve(directoryArg);
  const fixed=JSON.parse(readFileSync(join(directory,'paseo-plugin.json'),'utf8'));
  for(const v of ['0.11.2','0.12.0',version])compatibility.assertPluginCompatibility({...fixed,version:v,runtime:'app'});
- assert.throws(()=>compatibility.assertPluginCompatibility({...fixed,version:'0.14.0',runtime:'app'}));
+ assert.throws(()=>compatibility.assertPluginCompatibility({...fixed,version:nextMinor,runtime:'app'}));
  const bundles=await compilePlugin({client:directory+'/index.client.tsx',server:directory+'/index.server.ts'});
  const calls=[], opened=[];
  const snapshot={enabled:true,mode:'enforce',notifications:true,enforcementReady:true,settingsRevision:0,
